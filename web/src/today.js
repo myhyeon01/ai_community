@@ -22,16 +22,12 @@ export function buildTodayView(timetable, schedules, now = new Date()) {
   const today = isoDate(now)
   const actualWeekday = (now.getDay() + 6) % 7
   const override = schedules.find((row) => row.start_date <= today && row.end_date >= today && row.applied_weekday)
-  const overrideIndex = override
-    ? Number.isInteger(override.applied_weekday)
-      ? override.applied_weekday
-      : DAY_NAMES.indexOf(override.applied_weekday)
-    : -1
+  const overrideIndex = override ? DAY_NAMES.indexOf(override.applied_weekday) : -1
   const appliedWeekday = overrideIndex >= 0 ? overrideIndex : actualWeekday
   const changes = calculateMakeupSchedules(schedules, timetable)
   const originalChanges = new Map(changes.filter((row) => row.originalDate === today).map((row) => [row.timetableId, row]))
   const makeupChanges = new Map(changes.filter((row) => row.changedDate === today).map((row) => [row.timetableId, row]))
-  const holiday = schedules.find((row) => ["공휴일", "휴업일", "holiday"].includes(row.event_type) && row.start_date <= today && row.end_date >= today)
+  const holiday = schedules.find((row) => ["공휴일", "휴업일"].includes(row.event_type) && row.start_date <= today && row.end_date >= today)
   const selected = new Map()
 
   timetable.filter((row) => row.weekday === appliedWeekday).forEach((row) => {

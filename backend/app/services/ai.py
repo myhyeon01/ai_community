@@ -29,3 +29,4 @@ class AIService:
         except json.JSONDecodeError:
             summary = {"core": raw, "target": "", "period": "", "action": "", "contact": ""}
         return {"available": True, "summary": {key: str(summary.get(key, "")) for key in ("core", "target", "period", "action", "contact")}}
+

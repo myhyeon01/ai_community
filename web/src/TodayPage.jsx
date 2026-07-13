@@ -13,24 +13,9 @@ export default function TodayPage() {
     try {
       const { data: authData, error: authError } = await supabase.auth.getUser()
       if (authError || !authData.user) throw authError || new Error("로그인 사용자 정보를 확인할 수 없습니다.")
-      const savedTimetableId = Number(localStorage.getItem("kmu-active-timetable-id"))
-      let collectionQuery = supabase
-        .from("timetable_collections")
-        .select("id")
-        .eq("user_id", authData.user.id)
-      if (Number.isFinite(savedTimetableId) && savedTimetableId > 0) {
-        collectionQuery = collectionQuery.eq("id", savedTimetableId)
-      } else {
-        collectionQuery = collectionQuery.order("updated_at", { ascending: false }).limit(1)
-      }
-      const { data: collections, error: collectionError } = await collectionQuery
-      if (collectionError) throw collectionError
-      const activeTimetableId = collections?.[0]?.id
       const [calendar, timetable] = await Promise.all([
         getAcademicCalendar(force),
-        activeTimetableId
-          ? supabase.from("timetables").select("*").eq("user_id", authData.user.id).eq("timetable_id", activeTimetableId).order("weekday").order("start_time")
-          : Promise.resolve({ data: [], error: null }),
+        supabase.from("timetables").select("*").eq("user_id", authData.user.id).order("weekday").order("start_time"),
       ])
       if (timetable.error) throw timetable.error
       const rows = (timetable.data || []).map((row) => ({

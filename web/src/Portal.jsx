@@ -10,14 +10,18 @@ import {
   Clock3,
   GraduationCap,
   Home,
+  Import,
   LogOut,
   Map,
   Search,
   Sparkles,
   UserRound,
+  UsersRound,
 } from "lucide-react";
 import { supabase } from "./supabase";
-import EventsPage from "./EventsPage";
+import { AcademicPage, CalendarPage } from "./AcademicPages";
+import TodayPage from "./TodayPage";
+import NoticesPage from "./NoticesPage";
 import "./portal.css";
 
 const pages = [
@@ -231,12 +235,13 @@ function HomePage({ onNavigate }) {
 }
 
 export default function Portal({ session, timetable }) {
-  const [active, setActive] = useState("home"),
+  const [active, setActive] = useState(() => window.location.hash.slice(1) || "home"),
     [profile, setProfile] = useState(null);
   const page = useMemo(
     () => pages.find((p) => p[0] === active) || pages[0],
     [active],
   );
+  const userName = profile?.name || session.user.user_metadata?.name;
   useEffect(() => {
     supabase
       .from("profiles")
@@ -245,7 +250,7 @@ export default function Portal({ session, timetable }) {
       .then(({ data }) => setProfile(data));
     const pop = (e) => setActive(e.state?.page || "home");
     window.addEventListener("popstate", pop);
-    window.history.replaceState({ page: "home" }, "", "#home");
+    window.history.replaceState({ page: active }, "", `#${active}`);
     return () => window.removeEventListener("popstate", pop);
   }, []);
   function navigate(id) {
@@ -303,9 +308,7 @@ export default function Portal({ session, timetable }) {
           </div>
           <div>
             <b>{page[1]}</b>
-            <span>
-              {profile?.name || session.user.user_metadata?.name || "학생"}님
-            </span>
+            {userName && <span>{userName}님</span>}
           </div>
         </header>
         <div className="mobile-page-nav">
@@ -325,8 +328,14 @@ export default function Portal({ session, timetable }) {
             <HomePage onNavigate={navigate} />
           ) : active === "timetable" ? (
             timetable
-          ) : active === "events" ? (
-            <EventsPage profile={profile} />
+          ) : active === "today" ? (
+            <TodayPage />
+          ) : active === "academic" ? (
+            <AcademicPage />
+          ) : active === "notices" ? (
+            <NoticesPage />
+          ) : active === "calendar" ? (
+            <CalendarPage />
           ) : (
             <EmptyPage page={page} onNavigate={navigate} />
           )}
