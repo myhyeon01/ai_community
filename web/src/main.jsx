@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { supabase } from "./supabase";
 import { recognizeTimetable } from "./ocr";
+import Portal from "./Portal";
 import "./styles.css";
 import "./ocr.css";
 import "./week.css";
@@ -625,6 +626,10 @@ function App() {
         연결 중…
       </div>
     );
-  return session ? <Dashboard session={session} /> : <Auth />;
+  return session ? (
+    <Portal session={session} timetable={<Dashboard session={session} />} />
+  ) : (
+    <Auth />
+  );
 }
 createRoot(document.getElementById("root")).render(<App />);
