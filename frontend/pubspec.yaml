@@ -1,0 +1,25 @@
+name: kmu_smart_scheduler
+description: KMU Smart Scheduler Flutter client
+publish_to: none
+version: 0.1.0+1
+environment:
+  sdk: '>=3.4.0 <4.0.0'
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_riverpod: ^2.6.1
+  dio: ^5.8.0+1
+  flutter_secure_storage: ^9.2.4
+  intl: ^0.20.2
+  table_calendar: ^3.2.0
+  google_mlkit_text_recognition: ^0.15.0
+  image_picker: ^1.1.2
+  file_picker: ^10.1.2
+  shared_preferences: ^2.5.3
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+flutter:
+  uses-material-design: true
+
