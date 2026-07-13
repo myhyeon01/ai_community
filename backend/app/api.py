@@ -1,5 +1,6 @@
 from datetime import date, datetime
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+import asyncio
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app import models, schemas
@@ -11,8 +12,35 @@ from app.services.calendar import CalendarService
 from app.services.ai import AIService
 from app.services.imports import EverytimeImportService
 from app.services.ocr import OCRService
+from app.services.crawler import KMUCrawler
+from app.services.notices import notice_service
+from app.core.config import settings
 
 router=APIRouter(prefix="/api/v1")
+@router.get("/academic-calendar",tags=["Academic"])
+async def live_academic_calendar():
+    try: return await KMUCrawler().fetch_academic_calendar(settings.kmu_academic_url)
+    except Exception as error: raise HTTPException(502,f"계명대학교 학사일정을 불러오지 못했습니다: {error}")
+@router.get("/notices",tags=["Notices"])
+async def notices(query:str="",category:str="전체",page:int=Query(1,ge=1),limit:int=Query(20,ge=1,le=50)):
+    if category not in {"전체","학사","장학","취업","행사","기타"}: raise HTTPException(422,"지원하지 않는 공지 카테고리입니다.")
+    try: return await notice_service.list(query=query,category=category,page=page,limit=limit)
+    except Exception as error: raise HTTPException(502,f"계명대학교 공지를 불러오지 못했습니다: {error}")
+@router.post("/notices/refresh",tags=["Notices"])
+async def refresh_notices():
+    try: return await notice_service.refresh()
+    except Exception as error: raise HTTPException(502,f"계명대학교 공지를 새로고침하지 못했습니다: {error}")
+@router.post("/notices/{notice_id}/summary",tags=["Notices"])
+async def summarize_notice(notice_id:str):
+    try:
+        notice=await notice_service.detail(notice_id)
+        return await asyncio.to_thread(AIService().summarize_notice,notice)
+    except Exception as error: raise HTTPException(502,f"공지 AI 요약에 실패했습니다: {error}")
+@router.get("/notices/{notice_id}",tags=["Notices"])
+async def notice_detail(notice_id:str):
+    if not notice_id.isdigit(): raise HTTPException(422,"올바른 공지 ID가 아닙니다.")
+    try: return await notice_service.detail(notice_id)
+    except Exception as error: raise HTTPException(502,f"계명대학교 공지 상세를 불러오지 못했습니다: {error}")
 @router.post("/auth/register",response_model=schemas.Token,tags=["Auth"])
 def register(data:schemas.Register,db:Session=Depends(get_db)): return AuthService(UserRepository(db)).register(data)
 @router.post("/auth/login",response_model=schemas.Token,tags=["Auth"])
