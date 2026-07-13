@@ -4,6 +4,8 @@ import {
   ArrowLeft,
   CalendarDays,
   Camera,
+  ChevronLeft,
+  ChevronRight,
   ImagePlus,
   LogOut,
   Plus,
@@ -37,6 +39,30 @@ const isUsefulCourse = (row) => {
     !/^(수업|강의|미정|과목|[A-Za-z가-힣])$/.test(subject)
   );
 };
+const toMinutes = (time) => {
+  const [h, m] = String(time || "00:00")
+    .slice(0, 5)
+    .split(":")
+    .map(Number);
+  return h * 60 + m;
+};
+const rangesOverlap = (a, b) =>
+  a.weekday === b.weekday &&
+  toMinutes(a.start_time) < toMinutes(b.end_time) &&
+  toMinutes(a.end_time) > toMinutes(b.start_time);
+const addDays = (date, days) => {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+};
+const mondayOf = (date) => {
+  const monday = new Date(date);
+  monday.setHours(0, 0, 0, 0);
+  const day = monday.getDay();
+  monday.setDate(monday.getDate() + (day === 0 ? -6 : 1 - day));
+  return monday;
+};
+const monthDay = (date) => `${date.getMonth() + 1}.${date.getDate()}`;
 function Back({ onClick }) {
   return (
     <button type="button" className="back" onClick={onClick}>
@@ -299,7 +325,7 @@ function ColorGroupEditor({ group, index, update, remove }) {
     </div>
   );
 }
-function Register({ session, back, saved }) {
+function Register({ session, back, saved, existingRows = [] }) {
   const [mode, setMode] = useState("manual"),
     [rows, setRows] = useState([empty()]),
     [file, setFile] = useState(),
@@ -344,6 +370,24 @@ function Register({ session, back, saved }) {
         "과목명이 없거나 부정확한 항목을 수정한 후 저장해주세요.",
       );
     if (!rows.length) return setError("저장할 수업을 추가해주세요.");
+    const usefulRows = rows.filter(isUsefulCourse);
+    for (let i = 0; i < usefulRows.length; i += 1) {
+      const row = usefulRows[i];
+      const existing = existingRows.find(
+        (item) => isUsefulCourse(item) && rangesOverlap(row, item),
+      );
+      if (existing)
+        return setError(
+          `${existing.start_time.slice(0, 5)}-${existing.end_time.slice(0, 5)} ${existing.subject} 일정과 시간이 겹칩니다.`,
+        );
+      const duplicate = usefulRows.find(
+        (item, index) => index !== i && rangesOverlap(row, item),
+      );
+      if (duplicate)
+        return setError(
+          `${duplicate.start_time.slice(0, 5)}-${duplicate.end_time.slice(0, 5)} ${duplicate.subject} 일정과 시간이 겹칩니다.`,
+        );
+    }
     const { error } = await supabase
       .from("timetables")
       .insert(rows.map((r) => ({ ...r, user_id: session.user.id })));
@@ -468,13 +512,13 @@ function Register({ session, back, saved }) {
   );
 }
 function WeeklyBoard({ rows }) {
-  const toMinutes = (time) => {
-    const [h, m] = time.slice(0, 5).split(":").map(Number);
-    return h * 60 + m;
-  };
+  const [weekOffset, setWeekOffset] = useState(0);
   const startHour = 9;
   const endHour = 22;
   const hourHeight = 92;
+  const weekStart = addDays(mondayOf(new Date()), weekOffset * 7);
+  const weekDates = days.map((_, index) => addDays(weekStart, index));
+  const columnWidth = 100 / days.length;
   return (
     <section className="card week-card">
       <div className="card-title">
@@ -489,10 +533,27 @@ function WeeklyBoard({ rows }) {
           {String(endHour).padStart(2, "0")}:00
         </small>
       </div>
+      <div className="week-controls">
+        <button type="button" onClick={() => setWeekOffset((v) => v - 1)}>
+          <ChevronLeft />
+          이전 주
+        </button>
+        <button type="button" onClick={() => setWeekOffset(0)}>
+          이번 주
+        </button>
+        <button type="button" onClick={() => setWeekOffset((v) => v + 1)}>
+          다음 주
+          <ChevronRight />
+        </button>
+      </div>
+      <div className="week-range">
+        {weekStart.getFullYear()}.{monthDay(weekDates[0])} -{" "}
+        {weekDates[6].getFullYear()}.{monthDay(weekDates[6])}
+      </div>
       <div className="week-scroll">
         <div className="week-board">
           <div className="week-head corner">시간</div>
-          {days.slice(0, 5).map((day, i) => (
+          {days.map((day, i) => (
             <div className="week-head" style={{ gridColumn: i + 2 }} key={day}>
               {day}요일
             </div>
@@ -515,15 +576,15 @@ function WeeklyBoard({ rows }) {
                 style={{ top: i * hourHeight }}
               />
             ))}
-            {days.slice(0, 5).map((day, i) => (
+            {days.map((day, i) => (
               <i
                 className="day-line"
                 key={day}
-                style={{ left: `${i * 20}%` }}
+                style={{ left: `${i * columnWidth}%` }}
               />
             ))}
             {rows
-              .filter((row) => row.weekday < 5 && isUsefulCourse(row))
+              .filter((row) => row.weekday < days.length && isUsefulCourse(row))
               .map((row) => {
                 const top =
                     ((toMinutes(row.start_time) - startHour * 60) / 60) *
@@ -540,8 +601,8 @@ function WeeklyBoard({ rows }) {
                     key={row.id}
                     style={{
                       top,
-                      left: `calc(${row.weekday * 20}% + 4px)`,
-                      width: "calc(20% - 8px)",
+                      left: `calc(${row.weekday * columnWidth}% + 4px)`,
+                      width: `calc(${columnWidth}% - 8px)`,
                       height,
                       background: row.color || "#356AE6",
                     }}
@@ -601,6 +662,7 @@ function Dashboard({ session }) {
     return (
       <Register
         session={session}
+        existingRows={rows}
         back={() => setAdding(false)}
         saved={() => {
           setAdding(false);
