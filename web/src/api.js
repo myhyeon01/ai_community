@@ -1,4 +1,24 @@
-const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
+function normalizeApiUrl(value) {
+  const fallback = 'http://127.0.0.1:8000/api/v1'
+  return String(value || fallback).replace(
+    /^http:\/\/localhost(?::|\/)/,
+    (match) => match.replace('localhost', '127.0.0.1'),
+  )
+}
+
+const baseUrl = normalizeApiUrl(import.meta.env.VITE_API_URL)
+
+export class ApiConnectionError extends Error {
+  constructor(requestUrl, cause) {
+    super(`API 서버에 연결할 수 없습니다. 요청 URL: ${requestUrl}. 백엔드가 실행 중인지 확인해 주세요.`)
+    this.name = 'ApiConnectionError'
+    this.cause = cause
+  }
+}
+
+export function isApiConnectionError(error) {
+  return error?.name === 'ApiConnectionError'
+}
 
 export async function api(path, options = {}) {
   const { supabase } = await import('./supabase')
@@ -12,8 +32,7 @@ export async function api(path, options = {}) {
     response = await fetch(requestUrl, { ...options, headers })
   } catch (error) {
     if (error?.name === 'AbortError') throw error
-    const reason = error instanceof Error ? error.message : String(error)
-    throw new Error(`API 서버에 연결할 수 없습니다. 요청 URL: ${requestUrl}. FastAPI가 실행 중인지 확인해주세요. (${reason})`, { cause: error })
+    throw new ApiConnectionError(requestUrl, error)
   }
   if (response.status === 204) return null
   const data = await response.json().catch(() => ({}))

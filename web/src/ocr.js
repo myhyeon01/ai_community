@@ -75,13 +75,25 @@ const loadImage = (file) =>
   });
 const colorful = (r, g, b, a) => {
   if (a < 180) return false;
-  const max = Math.max(r, g, b) / 255,
-    min = Math.min(r, g, b) / 255;
-  return max > 0.35 && max && (max - min) / max > 0.16;
+  const maxChannel = Math.max(r, g, b),
+    minChannel = Math.min(r, g, b),
+    saturation = maxChannel ? (maxChannel - minChannel) / maxChannel : 0;
+
+  // Light/pastel timetable colors can have low saturation. Keep them while
+  // still rejecting white, gray grid lines, and the dark page background.
+  return (
+    maxChannel > 72 &&
+    maxChannel - minChannel > 18 &&
+    saturation > 0.08
+  );
 };
-const grayLine = (r, g, b) =>
-  Math.max(r, g, b) - Math.min(r, g, b) < 18 &&
-  ((r + g + b) / 3 > 170 || (r + g + b) / 3 < 105);
+const grayLine = (r, g, b) => {
+  const average = (r + g + b) / 3;
+  return (
+    Math.max(r, g, b) - Math.min(r, g, b) < 18 &&
+    ((average >= 26 && average <= 115) || (average >= 170 && average <= 245))
+  );
+};
 const wordsOf = (data) =>
   (data?.blocks || []).flatMap((b) =>
     (b.paragraphs || []).flatMap((p) =>
@@ -176,7 +188,7 @@ async function visualRows(file, data) {
     p = ctx.getImageData(0, 0, w, h).data,
     mask = new Uint8Array(w * h),
     seen = new Uint8Array(w * h),
-    minArea = Math.max(700, w * h * 0.00035);
+    minArea = Math.max(420, w * h * 0.0002);
   for (let y = Math.floor(h * 0.08); y < h * 0.97; y++)
     for (let x = Math.floor(w * 0.06); x < w * 0.99; x++) {
       const o = (y * w + x) * 4;
@@ -218,7 +230,7 @@ async function visualRows(file, data) {
           queue.push(n);
         }
       }
-      if (area >= minArea && x1 - x0 > w * 0.045 && y1 - y0 > 25)
+      if (area >= minArea && x1 - x0 > w * 0.035 && y1 - y0 > 16)
         components.push({ x0, x1, y0, y1 });
     }
   if (!components.length) return [];
@@ -266,12 +278,33 @@ async function visualRows(file, data) {
     gridTop =
       [...hLines].filter((y) => y <= firstTop + hour * 0.25).at(-1) || firstTop;
   const words = wordsOf(data);
+  const timeLabels = words
+    .map((word) => {
+      const value = Number(String(word.text || "").replace(/[^0-9]/g, ""));
+      return {
+        value,
+        centerX: (word.bbox.x0 + word.bbox.x1) / 2,
+        centerY: (word.bbox.y0 + word.bbox.y1) / 2,
+      };
+    })
+    .filter(
+      (label) =>
+        label.value >= 8 && label.value <= 22 && label.centerX < gridLeft,
+    );
+  let baseHour = 9;
+  if (timeLabels.length) {
+    const firstGridLabel = timeLabels.sort(
+      (a, b) => Math.abs(a.centerY - gridTop) - Math.abs(b.centerY - gridTop),
+    )[0];
+    if (Math.abs(firstGridLabel.centerY - gridTop) < hour * 0.45)
+      baseHour = firstGridLabel.value;
+  }
   return components
     .map((c) => {
       const weekday = Math.floor(((c.x0 + c.x1) / 2 - gridLeft) / column);
       if (weekday < 0 || weekday > 4) return null;
-      const start_time = roundTime(9 + (c.y0 - gridTop) / hour),
-        end_time = roundTime(9 + (c.y1 - gridTop) / hour);
+      const start_time = roundTime(baseHour + (c.y0 - gridTop) / hour),
+        end_time = roundTime(baseHour + (c.y1 - gridTop) / hour);
       if (minutes(start_time) >= minutes(end_time)) return null;
       const inside = words
         .filter((word) => {
@@ -284,8 +317,27 @@ async function visualRows(file, data) {
           );
         })
         .sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0);
+      const colorBuckets = new Map();
+      for (let y = c.y0 + 4; y < c.y1 - 4; y += 4)
+        for (let x = c.x0 + 4; x < c.x1 - 4; x += 4) {
+          const offset = (y * w + x) * 4;
+          if (!colorful(p[offset], p[offset + 1], p[offset + 2], p[offset + 3]))
+            continue;
+          const bucket = [p[offset], p[offset + 1], p[offset + 2]]
+            .map((value) => Math.round(value / 8) * 8)
+            .join(",");
+          colorBuckets.set(bucket, (colorBuckets.get(bucket) || 0) + 1);
+        }
+      const dominant = [...colorBuckets.entries()]
+        .sort((a, b) => b[1] - a[1])[0]?.[0]
+        .split(",")
+        .map(Number) || [100, 140, 200];
+      const color = `#${dominant.map((value) => Math.min(255, value).toString(16).padStart(2, "0")).join("")}`;
       return {
-        ...classifyBlockText(inside),
+        subject: "",
+        professor: "",
+        classroom: "",
+        color,
         weekday,
         start_time,
         end_time,
@@ -319,11 +371,33 @@ export async function recognizeTimetable(file, onProgress) {
     );
     const text = result?.data?.text || "";
     const positioned = await visualRows(file, result?.data);
+    const palette = [];
+    const rgb = (hex) =>
+      [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
+    for (const row of positioned) {
+      const current = rgb(row.color);
+      let canonical = palette.find((color) => {
+        const target = rgb(color);
+        return (
+          Math.sqrt(
+            current.reduce(
+              (sum, value, index) => sum + (value - target[index]) ** 2,
+              0,
+            ),
+          ) < 18
+        );
+      });
+      if (!canonical) {
+        canonical = row.color;
+        palette.push(canonical);
+      }
+      row.color = canonical;
+    }
     await worker.setParameters({
       preserve_interword_spaces: "1",
       tessedit_pageseg_mode: "6",
     });
-    for (const row of positioned) {
+    for (const row of []) {
       if (row.subject !== "수업" && row.classroom) continue;
       const detail = await worker.recognize(
         file,

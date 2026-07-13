@@ -10,15 +10,14 @@ import {
   Clock3,
   GraduationCap,
   Home,
-  Import,
   LogOut,
   Map,
   Search,
   Sparkles,
   UserRound,
-  UsersRound,
 } from "lucide-react";
 import { supabase } from "./supabase";
+import EventsPage from "./EventsPage";
 import { AcademicPage, CalendarPage } from "./AcademicPages";
 import TodayPage from "./TodayPage";
 import NoticesPage from "./NoticesPage";
@@ -336,6 +335,8 @@ export default function Portal({ session, timetable }) {
             <NoticesPage />
           ) : active === "calendar" ? (
             <CalendarPage />
+          ) : active === "events" ? (
+            <EventsPage profile={profile} />
           ) : (
             <EmptyPage page={page} onNavigate={navigate} />
           )}
