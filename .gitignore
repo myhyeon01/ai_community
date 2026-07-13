@@ -7,6 +7,8 @@ node_modules/
 dist/
 *.log
 .vite/
+*.db
+/package-lock.json
 .dart_tool/
 .flutter-plugins*
 build/

@@ -10,15 +10,14 @@ import {
   Clock3,
   GraduationCap,
   Home,
-  Import,
   LogOut,
   Map,
   Search,
   Sparkles,
   UserRound,
-  UsersRound,
 } from "lucide-react";
 import { supabase } from "./supabase";
+import EventsPage from "./EventsPage";
 import "./portal.css";
 
 const pages = [
@@ -326,6 +325,8 @@ export default function Portal({ session, timetable }) {
             <HomePage onNavigate={navigate} />
           ) : active === "timetable" ? (
             timetable
+          ) : active === "events" ? (
+            <EventsPage profile={profile} />
           ) : (
             <EmptyPage page={page} onNavigate={navigate} />
           )}
