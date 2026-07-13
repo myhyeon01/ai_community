@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
@@ -141,18 +141,8 @@ class SchoolEventRepository:
         sort: str = "upcoming",
         page: int = 1,
         limit: int = 24,
-        active_only: bool = False,
     ):
         stmt = select(models.SchoolEvent)
-        if active_only:
-            now = datetime.now()
-            stmt = stmt.where(
-                models.SchoolEvent.ends_at >= now,
-                or_(
-                    models.SchoolEvent.apply_deadline.is_(None),
-                    models.SchoolEvent.apply_deadline >= now,
-                ),
-            )
         if q:
             like = f"%{q.strip()}%"
             stmt = stmt.where(
@@ -178,13 +168,6 @@ class SchoolEventRepository:
         if end_date:
             stmt = stmt.where(models.SchoolEvent.starts_at <= datetime.combine(end_date, datetime.max.time()))
         if sort == "deadline":
-            now = datetime.now()
-            stmt = stmt.where(
-                models.SchoolEvent.apply_deadline.is_not(None),
-                models.SchoolEvent.apply_deadline >= now,
-                models.SchoolEvent.apply_deadline <= now + timedelta(days=30),
-                models.SchoolEvent.ends_at >= now,
-            )
             stmt = stmt.order_by(models.SchoolEvent.apply_deadline.is_(None), models.SchoolEvent.apply_deadline, models.SchoolEvent.starts_at)
         elif sort == "latest":
             stmt = stmt.order_by(models.SchoolEvent.id.desc())

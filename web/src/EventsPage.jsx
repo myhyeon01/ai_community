@@ -60,7 +60,7 @@ const actionCards = [
     id: "deadlines",
     title: "신청 마감",
     Icon: TimerReset,
-    description: "30일 이내에 신청이 마감되는 행사를 확인합니다.",
+    description: "마감이 가까운 행사를 확인합니다.",
   },
 ];
 
@@ -181,16 +181,6 @@ function deadlineState(event) {
   if (diff === 0) return { label: "오늘 마감", closed: false, urgent: true };
   if (diff <= 3) return { label: `D-${diff}`, closed: false, urgent: true };
   return { label: `D-${diff}`, closed: false, urgent: false };
-}
-
-function isDeadlineWithinMonth(event) {
-  if (!event.apply_deadline || deadlineState(event).closed) return false;
-  const now = new Date();
-  const deadline = new Date(event.apply_deadline);
-  if (Number.isNaN(deadline.getTime())) return false;
-  deadline.setHours(23, 59, 59, 999);
-  const daysLeft = (deadline.getTime() - now.getTime()) / 86400000;
-  return daysLeft >= 0 && daysLeft <= 30;
 }
 
 function summaryLines(value) {
@@ -414,7 +404,7 @@ export default function EventsPage({ profile }) {
   const deadlineItems = useMemo(
     () =>
       [...deadlines]
-        .filter(isDeadlineWithinMonth)
+        .filter((event) => !deadlineState(event).closed)
         .sort(
           (a, b) => dateValue(a.apply_deadline) - dateValue(b.apply_deadline),
         ),
@@ -437,7 +427,6 @@ export default function EventsPage({ profile }) {
           start_date: startDate,
           end_date: endDate,
           sort,
-          active_only: true,
           page: 1,
           limit: 24,
         });
@@ -446,7 +435,7 @@ export default function EventsPage({ profile }) {
         await syncKmuEventsOnce();
         items = toItems(await api(path));
       }
-      setEvents(items.filter((event) => !deadlineState(event).closed));
+      setEvents(items);
     } catch (e) {
       setEvents([]);
       setError(`행사 탐색을 불러오지 못했습니다. ${e.message}`);
@@ -749,8 +738,8 @@ export default function EventsPage({ profile }) {
 
         {active === "deadlines" && (
           <EventList
-            emptyText="오늘부터 30일 이내에 신청이 마감되는 행사가 표시됩니다."
-            emptyTitle="한 달 이내 신청 마감 행사가 없습니다."
+            emptyText="마감 예정 행사가 생기면 이곳에 표시됩니다."
+            emptyTitle="신청 마감 예정 행사가 없습니다."
             favoriteBusy={favoriteBusy}
             items={deadlineItems}
             loading={loading.deadlines}

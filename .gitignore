@@ -8,6 +8,8 @@ dist/
 *.log
 *.db
 .vite/
+*.db
+/package-lock.json
 .dart_tool/
 .flutter-plugins*
 build/

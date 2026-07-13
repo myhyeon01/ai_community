@@ -1,5 +1,4 @@
 from datetime import date, datetime
-import asyncio
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,64 +10,12 @@ from app.repositories import CalendarRepository, CourseRepository, SchoolEventRe
 from app.services.auth import AuthService
 from app.services.calendar import CalendarService
 from app.services.ai import AIService
+from app.services.crawler import KMUCrawler
 from app.services.imports import EverytimeImportService
 from app.services.ocr import OCRService
-from app.services.academic_calendar import AcademicCalendarCrawler
-from app.services.crawler import KMUCrawler
 from app.services.story import StoryPlusCrawler
-from app.services.notices import notice_service
 
 router=APIRouter(prefix="/api/v1")
-
-@router.get("/academic-calendar",tags=["Academic"])
-async def live_academic_calendar(year:int=date.today().year,refresh:bool=False):
-    if year < 2010 or year > date.today().year + 1:
-        raise HTTPException(422,"조회 가능한 연도가 아닙니다.")
-    try:
-        return await AcademicCalendarCrawler().fetch(year, force=refresh)
-    except Exception as exc:
-        raise HTTPException(502,f"학교 학사일정을 불러오지 못했습니다: {exc}") from exc
-
-@router.get("/academic-calendar/years",tags=["Academic"])
-async def academic_calendar_years():
-    try:
-        return await AcademicCalendarCrawler().available_years()
-    except Exception as exc:
-        raise HTTPException(502,f"학교 학사일정 연도 목록을 불러오지 못했습니다: {exc}") from exc
-
-@router.get("/notices",tags=["Notices"])
-async def notices(query:str="",category:str="전체",page:int=Query(1,ge=1),limit:int=Query(20,ge=1,le=50)):
-    if category not in {"전체","학사","장학","취업","행사","기타"}:
-        raise HTTPException(422,"지원하지 않는 공지 카테고리입니다.")
-    try:
-        return await notice_service.list(query=query,category=category,page=page,limit=limit)
-    except Exception as error:
-        raise HTTPException(502,f"계명대학교 공지를 불러오지 못했습니다: {error}") from error
-
-@router.post("/notices/refresh",tags=["Notices"])
-async def refresh_notices():
-    try:
-        return await notice_service.refresh()
-    except Exception as error:
-        raise HTTPException(502,f"계명대학교 공지를 새로고침하지 못했습니다: {error}") from error
-
-@router.post("/notices/{notice_id}/summary",tags=["Notices"])
-async def summarize_notice(notice_id:str):
-    try:
-        notice=await notice_service.detail(notice_id)
-        return await asyncio.to_thread(AIService().summarize_notice,notice)
-    except Exception as error:
-        raise HTTPException(502,f"공지 AI 요약에 실패했습니다: {error}") from error
-
-@router.get("/notices/{notice_id}",tags=["Notices"])
-async def notice_detail(notice_id:str):
-    if not notice_id.isdigit():
-        raise HTTPException(422,"올바른 공지 ID가 아닙니다.")
-    try:
-        return await notice_service.detail(notice_id)
-    except Exception as error:
-        raise HTTPException(502,f"계명대학교 공지 상세를 불러오지 못했습니다: {error}") from error
-
 @router.post("/auth/register",response_model=schemas.Token,tags=["Auth"])
 def register(data:schemas.Register,db:Session=Depends(get_db)): return AuthService(UserRepository(db)).register(data)
 @router.post("/auth/login",response_model=schemas.Token,tags=["Auth"])
@@ -110,15 +57,36 @@ def academic_events(start:date,end:date,db:Session=Depends(get_db),user=Depends(
     return list(db.scalars(select(models.AcademicEvent).where(models.AcademicEvent.start_date<=end,models.AcademicEvent.end_date>=start)))
 
 @router.get("/events",response_model=list[schemas.SchoolEventOut],tags=["Events"])
-def school_events(q:str="",category:str="",source_type:str="",interest:str="",start_date:date|None=None,end_date:date|None=None,sort:str="upcoming",active_only:bool=False,page:int=Query(1,ge=1),limit:int=Query(24,ge=1,le=100),user=Depends(current_user),db:Session=Depends(get_db)):
-    return SchoolEventRepository(db).list(user.id,q,category,source_type,interest,start_date,end_date,sort,page,limit,active_only)
+def school_events(
+    q:str="",
+    category:str="",
+    source_type:str="",
+    interest:str="",
+    start_date:date|None=None,
+    end_date:date|None=None,
+    sort:str="upcoming",
+    page:int=Query(1,ge=1),
+    limit:int=Query(24,ge=1,le=100),
+    user=Depends(current_user),
+    db:Session=Depends(get_db),
+):
+    return SchoolEventRepository(db).list(user.id,q,category,source_type,interest,start_date,end_date,sort,page,limit)
 
 @router.post("/events/sync/kmu",tags=["Events"])
-async def sync_kmu_events(pages:int=Query(5,ge=1,le=10),limit:int=Query(80,ge=1,le=200),user=Depends(current_user),db:Session=Depends(get_db)):
-    events=await KMUCrawler().fetch_school_events(settings.kmu_notice_url,pages=pages,limit=limit)
-    for event in events: event["source_type"]="school"
-    external=await KMUCrawler(image_ocr=False).fetch_school_events(settings.kmu_external_notice_url,pages=pages,limit=limit)
-    for event in external: event["source_type"]="external"
+async def sync_kmu_events(
+    pages:int=Query(5,ge=1,le=10),
+    limit:int=Query(80,ge=1,le=200),
+    user=Depends(current_user),
+    db:Session=Depends(get_db),
+):
+    crawler=KMUCrawler()
+    events=await crawler.fetch_school_events(settings.kmu_notice_url,pages=pages,limit=limit)
+    for event in events:
+        event["source_type"]="school"
+    external_crawler=KMUCrawler(image_ocr=False)
+    external=await external_crawler.fetch_school_events(settings.kmu_external_notice_url,pages=pages,limit=limit)
+    for event in external:
+        event["source_type"]="external"
     seen={event.get("source_key") for event in events}
     external=[event for event in external if event.get("source_key") not in seen]
     primary_quota=max(1,limit//2)
@@ -133,14 +101,25 @@ async def sync_kmu_events(pages:int=Query(5,ge=1,le=10),limit:int=Query(80,ge=1,
     return {"fetched":len(merged),**result}
 
 @router.post("/events/sync/story",tags=["Events"])
-async def sync_story_events(pages:int=Query(1,ge=1,le=5),limit:int=Query(80,ge=1,le=200),user=Depends(current_user),db:Session=Depends(get_db)):
+async def sync_story_events(
+    pages:int=Query(1,ge=1,le=5),
+    limit:int=Query(80,ge=1,le=200),
+    user=Depends(current_user),
+    db:Session=Depends(get_db),
+):
     events=await StoryPlusCrawler(session_cookie=settings.story_session_cookie).fetch_school_events(settings.story_event_list_url,pages=pages,limit=limit)
-    for event in events: event["source_type"]="school"
+    for event in events:
+        event["source_type"]="school"
     result=SchoolEventRepository(db).upsert_many(events)
     return {"fetched":len(events),**result}
 
 @router.get("/events/recommendations",response_model=list[schemas.SchoolEventOut],tags=["Events"])
-def event_recommendations(interests:str="",limit:int=Query(12,ge=1,le=50),user=Depends(current_user),db:Session=Depends(get_db)):
+def event_recommendations(
+    interests:str="",
+    limit:int=Query(12,ge=1,le=50),
+    user=Depends(current_user),
+    db:Session=Depends(get_db),
+):
     return SchoolEventRepository(db).recommendations(user,interests,limit)
 
 @router.get("/events/favorites",response_model=list[schemas.SchoolEventOut],tags=["Events"])
@@ -156,7 +135,7 @@ def add_event_favorite(event_id:int,user=Depends(current_user),db:Session=Depend
 @router.delete("/events/{event_id}/favorite",status_code=204,tags=["Events"])
 def delete_event_favorite(event_id:int,user=Depends(current_user),db:Session=Depends(get_db)):
     if not SchoolEventRepository(db).delete_favorite(user.id,event_id): raise HTTPException(404,"행사를 찾을 수 없습니다.")
-
 @router.get("/ai/today",tags=["AI"])
 def ai_today(target:date|None=None,user=Depends(current_user),db:Session=Depends(get_db)):
     view=CalendarService(CalendarRepository(db),CourseRepository(db)).today(user.id,target or date.today());return AIService().recommend(user,view)
+

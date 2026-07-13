@@ -12,8 +12,6 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4.1-mini"
     kmu_academic_url: str = "https://www.kmu.ac.kr"
     kmu_notice_url: str = "https://www.kmu.ac.kr/uni/main/page.jsp?mnu_uid=143&"
-    kmu_notice_cache_seconds: int = 600
-    kmu_notice_pages: int = 5
     kmu_external_notice_url: str = "https://www.kmu.ac.kr/uni/main/page.jsp?mnu_uid=141&"
     story_event_list_url: str = "https://story.kmu.ac.kr/user/Ep/EpMng010L.do?CURRENT_MENU_CODE=MENU0052&TOP_MENU_CODE=MENU0004"
     story_session_cookie: str = ""
