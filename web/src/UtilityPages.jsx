@@ -14,6 +14,7 @@ import {
 import { supabase } from "./supabase";
 import { academicFallback2026 } from "./academicData";
 import { schoolEvents } from "./AIHub";
+import { resolveRoomLocation } from "./room-location";
 import "./utility-pages.css";
 
 const readJson = (key, fallback = []) => {
@@ -97,24 +98,14 @@ export function AccountPage({ session, profile, onProfileUpdate, onNavigate }) {
   </div>;
 }
 
-const buildingFromRoom = (room) => {
-  const value = String(room || "").trim();
-  if (/^공|공학/.test(value)) return "공학관";
-  if (/바우어/.test(value)) return "바우어관";
-  if (/동산|도서/.test(value)) return "동산도서관";
-  if (/의양/.test(value)) return "의양관";
-  if (/봉경/.test(value)) return "봉경관";
-  return value ? "강의실 건물 정보 확인 필요" : "강의실을 입력해주세요";
-};
-
 export function ExtrasPage() {
   const [rows, setRows] = useState([]);
   const [room, setRoom] = useState("");
   useEffect(() => { supabase.from("timetables").select("*").order("weekday").order("start_time").then(({ data }) => setRows(data || [])); }, []);
   const classrooms = [...new Set(rows.map((row) => row.classroom).filter(Boolean))];
-  const building = buildingFromRoom(room);
+  const building = resolveRoomLocation(room);
   return <div className="utility-page"><PageHero icon={MapPin} eyebrow="KMU CAMPUS GUIDE" title="강의실 찾기" description="강의실 코드를 검색하고 계명대학교 캠퍼스 위치를 지도에서 확인합니다." />
-    <section className="room-finder utility-panel"><header><MapPin /><div><h2>강의실·건물 검색</h2><p>예: 공1402처럼 강의실 코드를 입력하면 건물을 안내합니다.</p></div></header><div><label><input value={room} onChange={(e) => setRoom(e.target.value)} placeholder="예: 공1402" /><b>{building}</b></label><a href={`https://map.naver.com/p/search/${encodeURIComponent(`계명대학교 ${room || building}`)}`} target="_blank" rel="noreferrer"><MapPin />지도에서 보기</a></div>{classrooms.length > 0 && <div className="room-suggestions"><b>내 시간표 강의실</b><div>{classrooms.map((classroom) => <button type="button" key={classroom} onClick={() => setRoom(classroom)}>{classroom}</button>)}</div></div>}</section>
+    <section className="room-finder utility-panel"><header><MapPin /><div><h2>강의실·건물 검색</h2><p>예: 공1402처럼 강의실 코드를 입력하면 건물을 안내합니다.</p></div></header><div><label><input value={room} onChange={(e) => setRoom(e.target.value)} placeholder="예: 공1402" /><b>{building.displayName}</b></label><a href={`https://map.naver.com/p/search/${encodeURIComponent(building.searchQuery)}`} target="_blank" rel="noreferrer"><MapPin />지도에서 보기</a></div>{classrooms.length > 0 && <div className="room-suggestions"><b>내 시간표 강의실</b><div>{classrooms.map((classroom) => <button type="button" key={classroom} onClick={() => setRoom(classroom)}>{classroom}</button>)}</div></div>}</section>
     <section className="campus-links"><a href="https://map.naver.com/p/search/%EA%B3%84%EB%AA%85%EB%8C%80%ED%95%99%EA%B5%90%20%EC%84%B1%EC%84%9C%EC%BA%A0%ED%8D%BC%EC%8A%A4" target="_blank" rel="noreferrer"><MapPin /><div><b>성서캠퍼스</b><span>대구광역시 달서구 달구벌대로 1095</span></div><ExternalLink /></a><a href="https://map.naver.com/p/search/%EA%B3%84%EB%AA%85%EB%8C%80%ED%95%99%EA%B5%90%20%EB%8C%80%EB%AA%85%EC%BA%A0%ED%8D%BC%EC%8A%A4" target="_blank" rel="noreferrer"><MapPin /><div><b>대명캠퍼스</b><span>대구광역시 남구 명덕로 104</span></div><ExternalLink /></a></section>
   </div>;
 }
