@@ -1,82 +1,281 @@
 export const CATEGORY_META = {
   term: { label: "개강·종강", keywords: ["개강", "종강", "개시일"] },
   makeup: { label: "보강주", keywords: ["보강", "휴강", "대체 수업"] },
-  exam: { label: "시험기간", keywords: ["시험", "중간고사", "기말고사", "정기시험"] },
-  registration: { label: "수강신청", keywords: ["수강신청", "수강정정", "복학", "휴학", "등록"] },
+  exam: {
+    label: "시험기간",
+    keywords: ["시험", "중간고사", "기말고사", "정기시험"],
+  },
+  registration: {
+    label: "수강신청",
+    keywords: ["수강신청", "수강정정", "복학", "휴학", "등록"],
+  },
   general: { label: "일반 일정", keywords: [] },
-}
+};
 
 export function categoryFor(row) {
-  const officialCategory = String(row.category || row.event_type || "")
-  if (row.source === "personal" || row.scheduleType === "보강" || /보강|휴강|대체/.test(officialCategory)) return "makeup"
-  if (/시험/.test(officialCategory)) return "exam"
-  if (/수강|등록|복학|휴학/.test(officialCategory)) return "registration"
-  if (/개강|종강/.test(officialCategory)) return "term"
-  return Object.entries(CATEGORY_META).find(([key, meta]) => key !== "general" && meta.keywords.some((word) => row.title.includes(word)))?.[0] || "general"
+  const officialCategory = String(row.category || row.event_type || "");
+  if (
+    row.source === "personal" ||
+    row.scheduleType === "보강" ||
+    /보강|휴강|대체/.test(officialCategory)
+  )
+    return "makeup";
+  if (/시험/.test(officialCategory)) return "exam";
+  if (/수강|등록|복학|휴학/.test(officialCategory)) return "registration";
+  if (/개강|종강/.test(officialCategory)) return "term";
+  return (
+    Object.entries(CATEGORY_META).find(
+      ([key, meta]) =>
+        key !== "general" &&
+        meta.keywords.some((word) => row.title.includes(word)),
+    )?.[0] || "general"
+  );
 }
 
 export function safeDate(value, row) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) { console.warn("학사일정 날짜 파싱 실패", row); return null }
-  const [year, month, day] = value.split("-").map(Number)
-  const result = new Date(year, month - 1, day)
-  if (result.getFullYear() !== year || result.getMonth() !== month - 1 || result.getDate() !== day) { console.warn("학사일정 날짜 파싱 실패", row); return null }
-  return result
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) {
+    console.warn("학사일정 날짜 파싱 실패", row);
+    return null;
+  }
+  const [year, month, day] = value.split("-").map(Number);
+  const result = new Date(year, month - 1, day);
+  if (
+    result.getFullYear() !== year ||
+    result.getMonth() !== month - 1 ||
+    result.getDate() !== day
+  ) {
+    console.warn("학사일정 날짜 파싱 실패", row);
+    return null;
+  }
+  return result;
 }
 
 export function dateKey(value) {
-  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
+
+export const MAX_EVENT_LANES = 3;
+
+export function eventKey(event) {
+  return `${event.title}|${event.startDate}|${event.endDate}|${event.category}|${event.source}`;
+}
+
+export function removeDuplicateEvents(events) {
+  const unique = new Map();
+  events.forEach((event) => {
+    const key = eventKey(event);
+    if (!unique.has(key)) unique.set(key, { ...event, calendarKey: key });
+  });
+  return [...unique.values()];
+}
+
+export function splitEventByWeek(event) {
+  const start = safeDate(event.startDate, event),
+    end = safeDate(event.endDate, event);
+  if (!start || !end || end < start) return [];
+  const segments = [];
+  let cursor = new Date(start);
+
+  while (cursor <= end) {
+    const daysUntilSaturday = 6 - cursor.getDay();
+    const weekEnd = new Date(cursor);
+    weekEnd.setDate(weekEnd.getDate() + daysUntilSaturday);
+    const segmentEnd = weekEnd < end ? weekEnd : new Date(end);
+    segments.push({
+      event,
+      startDate: dateKey(cursor),
+      endDate: dateKey(segmentEnd),
+      startDay: cursor.getDay(),
+      endDay: segmentEnd.getDay(),
+      span: Math.round((segmentEnd - cursor) / 86400000) + 1,
+      continuesBefore: cursor > start,
+      continuesAfter: segmentEnd < end,
+    });
+    cursor = new Date(segmentEnd);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return segments;
+}
+
+export function calculateEventLane(segments) {
+  const laneEnds = [];
+  return [...segments]
+    .sort(
+      (a, b) =>
+        a.startDay - b.startDay ||
+        b.span - a.span ||
+        a.event.title.localeCompare(b.event.title, "ko"),
+    )
+    .map((segment) => {
+      let lane = laneEnds.findIndex((endDay) => endDay < segment.startDay);
+      if (lane < 0) lane = laneEnds.length;
+      laneEnds[lane] = segment.endDay;
+      return { ...segment, lane };
+    });
+}
+
+export function buildCalendarRows(
+  year,
+  month,
+  events,
+  maxLanes = MAX_EVENT_LANES,
+) {
+  const cells = monthCells(year, month);
+  const deduplicated = removeDuplicateEvents(events);
+  return Array.from({ length: 6 }, (_, rowIndex) => {
+    const days = cells.slice(rowIndex * 7, rowIndex * 7 + 7);
+    const weekStart = dateKey(days[0]),
+      weekEnd = dateKey(days[6]);
+    const segments = calculateEventLane(
+      deduplicated.flatMap((event) =>
+        splitEventByWeek(event).filter(
+          (segment) =>
+            segment.startDate >= weekStart && segment.startDate <= weekEnd,
+        ),
+      ),
+    );
+    const visibleSegments = segments.filter(
+      (segment) => segment.lane < maxLanes,
+    );
+    const hiddenByDate = new Map();
+    days.forEach((day) => {
+      const key = dateKey(day);
+      const hidden = segments.filter(
+        (segment) =>
+          segment.lane >= maxLanes &&
+          segment.startDate <= key &&
+          segment.endDate >= key,
+      );
+      if (hidden.length)
+        hiddenByDate.set(
+          key,
+          hidden.map((segment) => segment.event),
+        );
+    });
+    return {
+      days,
+      weekStart,
+      weekEnd,
+      segments,
+      visibleSegments,
+      hiddenByDate,
+    };
+  });
+}
+
+export function getEventStyle(category) {
+  return (
+    {
+      term: { className: "cat-term", color: "#0f7f82", background: "#e5f6f5" },
+      makeup: {
+        className: "cat-makeup",
+        color: "#c4512d",
+        background: "#fff0e9",
+      },
+      exam: { className: "cat-exam", color: "#6d3bc1", background: "#f1eafe" },
+      registration: {
+        className: "cat-registration",
+        color: "#14785f",
+        background: "#e7f6ef",
+      },
+      general: {
+        className: "cat-general",
+        color: "#245fae",
+        background: "#eaf2ff",
+      },
+    }[category] || {
+      className: "cat-general",
+      color: "#68758a",
+      background: "#eef2f6",
+    }
+  );
 }
 
 export function calendarEvents(schedules, changes) {
   const official = schedules.flatMap((row) => {
-    const start = safeDate(row.start_date, row), end = safeDate(row.end_date, row)
-    if (!start || !end || end < start) return []
-    const event = { ...row, source: "official", startDate: row.start_date, endDate: row.end_date }
-    return [{ ...event, category: categoryFor(event) }]
-  })
+    const start = safeDate(row.start_date, row),
+      end = safeDate(row.end_date, row);
+    if (!start || !end || end < start) return [];
+    const event = {
+      ...row,
+      source: "official",
+      startDate: row.start_date,
+      endDate: row.end_date,
+    };
+    return [{ ...event, category: categoryFor(event) }];
+  });
   const personal = changes.flatMap((row) => {
-    const target = row.changedDate || row.originalDate
-    if (!safeDate(target, row)) return []
-    const event = { ...row, id: `personal-${row.id}`, title: `${row.courseName} ${row.scheduleType}`, startDate: target, endDate: target, source: "personal", category: "makeup", original_date: row.originalDate, changed_date: row.changedDate, schedule_type: row.scheduleType }
-    return [event]
-  })
-  const unique = new Map()
-  ;[...official, ...personal].forEach((event) => {
-    const key = `${event.title}|${event.startDate}|${event.endDate}|${event.courseName || ""}`
-    if (!unique.has(key)) unique.set(key, event)
-  })
-  return [...unique.values()]
+    const target = row.changedDate || row.originalDate;
+    if (!safeDate(target, row)) return [];
+    const event = {
+      ...row,
+      id: `personal-${row.id}`,
+      title: `${row.courseName} ${row.scheduleType}`,
+      startDate: target,
+      endDate: target,
+      source: "personal",
+      category: "makeup",
+      original_date: row.originalDate,
+      changed_date: row.changedDate,
+      schedule_type: row.scheduleType,
+    };
+    return [event];
+  });
+  return removeDuplicateEvents([...official, ...personal]);
 }
 
 export function yearsFor(events) {
-  const years = new Set()
-  events.forEach((event) => { years.add(Number(event.startDate.slice(0, 4))); years.add(Number(event.endDate.slice(0, 4))) })
-  return [...years].filter(Boolean).sort((a, b) => a - b)
+  const years = new Set();
+  events.forEach((event) => {
+    years.add(Number(event.startDate.slice(0, 4)));
+    years.add(Number(event.endDate.slice(0, 4)));
+  });
+  return [...years].filter(Boolean).sort((a, b) => a - b);
 }
 
 export function eventsByDate(events) {
-  const result = new Map()
+  const result = new Map();
   events.forEach((event) => {
-    const start = safeDate(event.startDate, event), end = safeDate(event.endDate, event)
-    if (!start || !end) return
-    for (const cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
-      const key = dateKey(cursor), current = result.get(key) || []
-      if (!current.some((item) => item.id === event.id)) result.set(key, [...current, event])
+    const start = safeDate(event.startDate, event),
+      end = safeDate(event.endDate, event);
+    if (!start || !end) return;
+    for (
+      const cursor = new Date(start);
+      cursor <= end;
+      cursor.setDate(cursor.getDate() + 1)
+    ) {
+      const key = dateKey(cursor),
+        current = result.get(key) || [];
+      if (!current.some((item) => item.calendarKey === event.calendarKey))
+        result.set(key, [...current, event]);
     }
-  })
-  return result
+  });
+  return result;
 }
 
 export function monthCells(year, month) {
-  const first = new Date(year, month, 1), start = new Date(year, month, 1 - first.getDay())
-  return Array.from({ length: 42 }, (_, index) => { const value = new Date(start); value.setDate(start.getDate() + index); return value })
+  const first = new Date(year, month, 1),
+    start = new Date(year, month, 1 - first.getDay());
+  return Array.from({ length: 42 }, (_, index) => {
+    const value = new Date(start);
+    value.setDate(start.getDate() + index);
+    return value;
+  });
 }
 
 export function summaryFor(events, now = new Date()) {
-  const today = dateKey(now)
+  const today = dateKey(now);
   return ["term", "makeup", "exam", "registration"].map((category) => {
-    const rows = events.filter((event) => event.category === category).sort((a, b) => a.startDate.localeCompare(b.startDate))
-    const representative = rows.find((event) => event.endDate >= today) || rows.at(-1)
-    return { category, label: CATEGORY_META[category].label, count: rows.length, representative }
-  })
+    const rows = events
+      .filter((event) => event.category === category)
+      .sort((a, b) => a.startDate.localeCompare(b.startDate));
+    const representative =
+      rows.find((event) => event.endDate >= today) || rows.at(-1);
+    return {
+      category,
+      label: CATEGORY_META[category].label,
+      count: rows.length,
+      representative,
+    };
+  });
 }
