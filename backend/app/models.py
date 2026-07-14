@@ -59,9 +59,23 @@ class SchoolEvent(Base):
     __tablename__ = "school_events"
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(250))
+    summary: Mapped[str] = mapped_column(Text, default="")
     starts_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     ends_at: Mapped[datetime] = mapped_column(DateTime)
+    apply_deadline: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     category: Mapped[str] = mapped_column(String(40), default="event")
+    source_type: Mapped[str] = mapped_column(String(20), default="school")
     department: Mapped[str] = mapped_column(String(100), default="")
+    location: Mapped[str] = mapped_column(String(150), default="")
+    interests: Mapped[str] = mapped_column(Text, default="")
     url: Mapped[str] = mapped_column(String(500), default="")
+    apply_url: Mapped[str] = mapped_column(String(500), default="")
     source_key: Mapped[str] = mapped_column(String(150), unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class SchoolEventFavorite(Base):
+    __tablename__ = "school_event_favorites"
+    user_id: Mapped[str] = mapped_column(ForeignKey("profiles.id", ondelete="CASCADE"), primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("school_events.id", ondelete="CASCADE"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    event: Mapped[SchoolEvent] = relationship()

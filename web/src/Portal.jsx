@@ -19,6 +19,19 @@ import {
   UsersRound,
 } from "lucide-react";
 import { supabase } from "./supabase";
+import AcademicPage from "./AcademicPage";
+import NotificationPage from "./NotificationPage";
+import PersonalSchedulePage from "./PersonalSchedulePage";
+import EventsPage from "./EventsPage";
+import TodayPage from "./TodayPage";
+import NoticesPage from "./NoticesPage";
+import { AccountPage, ExtrasPage, SearchPage } from "./UtilityPages";
+import {
+  AISchedulePage,
+  EventRecommendPage,
+  FreeTimePage,
+  StudyPlannerPage,
+} from "./AIHub";
 import "./portal.css";
 
 const pages = [
@@ -35,6 +48,20 @@ const pages = [
     UserRound,
     "내 정보와 관심 분야를 관리합니다.",
     ["회원정보", "학과·학년", "관심 분야", "비밀번호 재설정"],
+  ],
+  [
+    "search",
+    "검색",
+    Search,
+    "과목과 일정, 공지, 행사를 통합 검색합니다.",
+    ["통합 검색", "날짜 필터", "카테고리", "마감 임박"],
+  ],
+  [
+    "notifications",
+    "알림",
+    Bell,
+    "수업과 일정 알림을 설정합니다.",
+    ["수업 알림", "학사일정", "AI 계획", "마감 임박"],
   ],
   [
     "timetable",
@@ -72,32 +99,11 @@ const pages = [
     ["행사 탐색", "맞춤 추천", "관심 행사", "신청 마감"],
   ],
   [
-    "calendar",
-    "통합 캘린더",
-    CalendarDays,
-    "모든 수업과 일정을 달력에서 확인합니다.",
-    ["월간", "주간", "일간", "일정 검색"],
-  ],
-  [
     "personal",
     "개인 일정",
     ClipboardCheck,
     "약속과 운동, 아르바이트 일정을 관리합니다.",
     ["일정 등록", "반복 일정", "우선순위", "완료 관리"],
-  ],
-  [
-    "assignments",
-    "과제",
-    ClipboardCheck,
-    "과제 마감과 진행 상태를 관리합니다.",
-    ["과제 등록", "마감 임박", "진행 상태", "완료 과제"],
-  ],
-  [
-    "exams",
-    "시험",
-    GraduationCap,
-    "시험 일정과 D-Day를 관리합니다.",
-    ["시험 등록", "시험 범위", "D-Day", "공부 계획"],
   ],
   [
     "ai-plan",
@@ -128,32 +134,11 @@ const pages = [
     ["전공 행사", "취업 행사", "공모전", "추천 이유"],
   ],
   [
-    "notifications",
-    "알림",
-    Bell,
-    "수업과 일정 알림을 설정합니다.",
-    ["수업 알림", "과제·시험", "학교 일정", "알림 시간"],
-  ],
-  [
-    "search",
-    "검색",
-    Search,
-    "과목과 일정, 공지, 행사를 통합 검색합니다.",
-    ["통합 검색", "날짜 필터", "카테고리", "마감 임박"],
-  ],
-  [
-    "mypage",
-    "마이페이지",
-    UserRound,
-    "계정과 앱 환경을 관리합니다.",
-    ["프로필", "알림 설정", "다크 모드", "회원 탈퇴"],
-  ],
-  [
     "extras",
-    "부가 기능",
+    "강의실 찾기",
     Map,
-    "캠퍼스와 친구 기능을 이용합니다.",
-    ["캠퍼스 지도", "강의실 위치", "일정 공유", "빈 시간 비교"],
+    "강의실 코드와 캠퍼스 위치를 확인합니다.",
+    ["강의실 검색", "건물 안내", "성서캠퍼스", "대명캠퍼스"],
   ],
 ];
 
@@ -239,6 +224,10 @@ export default function Portal({ session, timetable }) {
     [active],
   );
   useEffect(() => {
+    document.body.classList.toggle(
+      "theme-dark",
+      localStorage.getItem("kmu-dark-mode") === "true",
+    );
     supabase
       .from("profiles")
       .select("*")
@@ -321,11 +310,37 @@ export default function Portal({ session, timetable }) {
             </button>
           ))}
         </div>
-        <div className="portal-content">
+        <div className={`portal-content ${active === "academic" ? "portal-content-wide" : ""}`}>
           {active === "home" ? (
             <HomePage onNavigate={navigate} />
           ) : active === "timetable" ? (
             timetable
+          ) : active === "today" ? (
+            <TodayPage />
+          ) : active === "academic" ? (
+            <AcademicPage />
+          ) : active === "notices" ? (
+            <NoticesPage />
+          ) : active === "events" ? (
+            <EventsPage profile={profile} />
+          ) : active === "ai-plan" ? (
+            <AISchedulePage />
+          ) : active === "study" ? (
+            <StudyPlannerPage />
+          ) : active === "free-time" ? (
+            <FreeTimePage />
+          ) : active === "recommend" ? (
+            <EventRecommendPage />
+          ) : active === "notifications" ? (
+            <NotificationPage />
+          ) : active === "personal" ? (
+            <PersonalSchedulePage session={session} />
+          ) : active === "search" ? (
+            <SearchPage onNavigate={navigate} />
+          ) : active === "account" ? (
+            <AccountPage session={session} profile={profile} onProfileUpdate={setProfile} onNavigate={navigate} />
+          ) : active === "extras" ? (
+            <ExtrasPage />
           ) : (
             <EmptyPage page={page} onNavigate={navigate} />
           )}
