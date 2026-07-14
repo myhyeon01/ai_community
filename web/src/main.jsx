@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
@@ -327,7 +327,9 @@ function Editor({ row, i, change, remove }) {
         과목명
         <input
           required
-          value={row.subject}
+            data-row-index={i}
+            data-field="subject"
+            value={row.subject}
           onChange={(e) => set("subject", e.target.value)}
         />
       </label>
@@ -335,6 +337,8 @@ function Editor({ row, i, change, remove }) {
         <label>
           교수명
           <input
+            data-row-index={i}
+            data-field="professor"
             value={row.professor}
             onChange={(e) => set("professor", e.target.value)}
           />
@@ -342,6 +346,8 @@ function Editor({ row, i, change, remove }) {
         <label>
           강의실
           <input
+            data-row-index={i}
+            data-field="classroom"
             value={row.classroom}
             onChange={(e) => set("classroom", e.target.value)}
           />
@@ -400,6 +406,8 @@ function ColorGroupEditor({ group, index, update, remove }) {
         과목명
         <input
           required
+          data-row-index={group.rowIndexes[0] ?? index}
+          data-field="subject"
           value={first.subject}
           placeholder="과목명을 입력하세요"
           onChange={(e) => update(group.key, "subject", e.target.value)}
@@ -409,6 +417,8 @@ function ColorGroupEditor({ group, index, update, remove }) {
         <label>
           교수명
           <input
+            data-row-index={group.rowIndexes[0] ?? index}
+            data-field="professor"
             value={first.professor}
             placeholder="교수명을 입력하세요"
             onChange={(e) => update(group.key, "professor", e.target.value)}
@@ -417,6 +427,8 @@ function ColorGroupEditor({ group, index, update, remove }) {
         <label>
           강의실
           <input
+            data-row-index={group.rowIndexes[0] ?? index}
+            data-field="classroom"
             value={first.classroom}
             placeholder="강의실을 입력하세요"
             onChange={(e) => update(group.key, "classroom", e.target.value)}
@@ -434,17 +446,58 @@ function ColorGroupEditor({ group, index, update, remove }) {
     </div>
   );
 }
-const normalizeOcrGroupText = (value) =>
-  String(value || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-const ocrGroupKey = (row, index) => {
-  const subject = normalizeOcrGroupText(row.subject),
-    classroom = normalizeOcrGroupText(row.classroom);
-  return subject && classroom
-    ? `${subject}::${classroom}`
-    : row._ocr?.id || `ocr-row-${index}`;
+const parseOcrColor = (value) => {
+  const match = /^#([0-9a-f]{6})$/i.exec(String(value || ""));
+  if (!match) return null;
+  return {
+    r: Number.parseInt(match[1].slice(0, 2), 16),
+    g: Number.parseInt(match[1].slice(2, 4), 16),
+    b: Number.parseInt(match[1].slice(4, 6), 16),
+  };
+};
+const ocrColorDistance = (left, right) =>
+  Math.sqrt(
+    (left.r - right.r) ** 2 +
+      (left.g - right.g) ** 2 +
+      (left.b - right.b) ** 2,
+  );
+const ocrRowKey = (row, index) => row._ocr?.id || row.id || `ocr-row-${index}`;
+const buildOcrColorGroups = (rows) => {
+  const groups = [];
+  rows.forEach((row, index) => {
+    const color = row.color || row._ocr?.color || "#64748b";
+    const rgb = parseOcrColor(color);
+    let group = rgb
+      ? groups.find(
+          (candidate) =>
+            candidate.rgb &&
+            ocrColorDistance(candidate.rgb, rgb) <= 44,
+        )
+      : null;
+    if (!group) {
+      group = {
+        key: `ocr-color-${color.toLowerCase()}-${groups.length}`,
+        color,
+        rgb,
+        rows: [],
+        rowKeys: new Set(),
+        rowIndexes: [],
+      };
+      groups.push(group);
+    }
+    group.rows.push(row);
+    group.rowKeys.add(ocrRowKey(row, index));
+    group.rowIndexes.push(index);
+    if (rgb) {
+      const count = group.rows.length;
+      group.rgb = {
+        r: (group.rgb.r * (count - 1) + rgb.r) / count,
+        g: (group.rgb.g * (count - 1) + rgb.g) / count,
+        b: (group.rgb.b * (count - 1) + rgb.b) / count,
+      };
+    }
+  });
+  return groups;
 };
 function TimetableForm({
   title,
@@ -547,6 +600,7 @@ function Register({
   selectedTimetable,
   editRow,
 }) {
+  const formRef = useRef(null);
   const [mode, setMode] = useState("manual"),
     [rows, setRows] = useState([editRow || empty()]),
     [file, setFile] = useState(),
@@ -554,6 +608,16 @@ function Register({
     [progress, setProgress] = useState(0),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const focusField = (rowIndex, field) => {
+    window.requestAnimationFrame(() => {
+      const selector = `[data-row-index="${rowIndex}"][data-field="${field}"]`;
+      const target = formRef.current?.querySelector(selector);
+      if (target?.focus) {
+        target.focus();
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    });
+  };
   function pick(e) {
     const x = e.target.files?.[0];
     if (!x) return;
@@ -591,6 +655,20 @@ function Register({
         "과목명이 없거나 부정확한 항목을 수정한 후 저장해주세요.",
       );
     if (!rows.length) return setError("저장할 수업을 추가해주세요.");
+    const requiredFields = ["subject", "professor", "classroom"];
+    const missingRowIndex = rows.findIndex((row) =>
+      requiredFields.some((field) => !String(row?.[field] || "").trim()),
+    );
+    if (missingRowIndex !== -1) {
+      const missingField = requiredFields.find(
+        (field) => !String(rows[missingRowIndex]?.[field] || "").trim(),
+      );
+      setError(
+        "저장 전에 과목명, 교수명, 강의실을 모두 입력해주세요. 비어 있는 항목으로 이동합니다.",
+      );
+      if (missingField) focusField(missingRowIndex, missingField);
+      return;
+    }
     const usefulRows = rows.filter(isUsefulCourse);
     const now = new Date().toISOString();
     const year = Number(selectedTimetable?.year ?? getCurrentYear());
@@ -639,25 +717,29 @@ function Register({
       : await supabase.from("timetables").insert(payload);
     error ? setError(error.message) : saved();
   }
-  const colorGroups = Object.values(
-    rows.reduce((result, row, index) => {
-      const key = ocrGroupKey(row, index);
-      if (!result[key])
-        result[key] = { key, color: row.color || "#64748b", rows: [] };
-      result[key].rows.push(row);
-      return result;
-    }, {}),
-  );
+  const colorGroups = buildOcrColorGroups(rows);
   const updateColorGroup = (groupKey, key, value) =>
-    setRows(
-      rows.map((row, index) =>
-        ocrGroupKey(row, index) === groupKey
+    setRows((currentRows) => {
+      const group = buildOcrColorGroups(currentRows).find(
+        (item) => item.key === groupKey,
+      );
+      if (!group) return currentRows;
+      return currentRows.map((row, index) =>
+        group.rowKeys.has(ocrRowKey(row, index))
           ? { ...row, [key]: value }
           : row,
-      ),
-    );
+      );
+    });
   const removeColorGroup = (groupKey) =>
-    setRows(rows.filter((row, index) => ocrGroupKey(row, index) !== groupKey));
+    setRows((currentRows) => {
+      const group = buildOcrColorGroups(currentRows).find(
+        (item) => item.key === groupKey,
+      );
+      if (!group) return currentRows;
+      return currentRows.filter(
+        (row, index) => !group.rowKeys.has(ocrRowKey(row, index)),
+      );
+    });
   return (
     <div className="content">
       <section className="card register">
@@ -724,7 +806,7 @@ function Register({
             )}
           </div>
         )}
-        <form onSubmit={save}>
+        <form ref={formRef} onSubmit={save}>
           {mode === "ocr" && !editRow
             ? colorGroups.map((group, i) => (
                 <ColorGroupEditor
