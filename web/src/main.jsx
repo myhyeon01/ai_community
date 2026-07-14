@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   ArrowLeft,
@@ -327,7 +327,9 @@ function Editor({ row, i, change, remove }) {
         과목명
         <input
           required
-          value={row.subject}
+            data-row-index={i}
+            data-field="subject"
+            value={row.subject}
           onChange={(e) => set("subject", e.target.value)}
         />
       </label>
@@ -335,6 +337,8 @@ function Editor({ row, i, change, remove }) {
         <label>
           교수명
           <input
+            data-row-index={i}
+            data-field="professor"
             value={row.professor}
             onChange={(e) => set("professor", e.target.value)}
           />
@@ -342,6 +346,8 @@ function Editor({ row, i, change, remove }) {
         <label>
           강의실
           <input
+            data-row-index={i}
+            data-field="classroom"
             value={row.classroom}
             onChange={(e) => set("classroom", e.target.value)}
           />
@@ -400,6 +406,8 @@ function ColorGroupEditor({ group, index, update, remove }) {
         과목명
         <input
           required
+          data-row-index={group.rowIndexes[0] ?? index}
+          data-field="subject"
           value={first.subject}
           placeholder="과목명을 입력하세요"
           onChange={(e) => update(group.key, "subject", e.target.value)}
@@ -409,6 +417,8 @@ function ColorGroupEditor({ group, index, update, remove }) {
         <label>
           교수명
           <input
+            data-row-index={group.rowIndexes[0] ?? index}
+            data-field="professor"
             value={first.professor}
             placeholder="교수명을 입력하세요"
             onChange={(e) => update(group.key, "professor", e.target.value)}
@@ -417,6 +427,8 @@ function ColorGroupEditor({ group, index, update, remove }) {
         <label>
           강의실
           <input
+            data-row-index={group.rowIndexes[0] ?? index}
+            data-field="classroom"
             value={first.classroom}
             placeholder="강의실을 입력하세요"
             onChange={(e) => update(group.key, "classroom", e.target.value)}
@@ -469,11 +481,13 @@ const buildOcrColorGroups = (rows) => {
         rgb,
         rows: [],
         rowKeys: new Set(),
+        rowIndexes: [],
       };
       groups.push(group);
     }
     group.rows.push(row);
     group.rowKeys.add(ocrRowKey(row, index));
+    group.rowIndexes.push(index);
     if (rgb) {
       const count = group.rows.length;
       group.rgb = {
@@ -586,6 +600,7 @@ function Register({
   selectedTimetable,
   editRow,
 }) {
+  const formRef = useRef(null);
   const [mode, setMode] = useState("manual"),
     [rows, setRows] = useState([editRow || empty()]),
     [file, setFile] = useState(),
@@ -593,6 +608,16 @@ function Register({
     [progress, setProgress] = useState(0),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const focusField = (rowIndex, field) => {
+    window.requestAnimationFrame(() => {
+      const selector = `[data-row-index="${rowIndex}"][data-field="${field}"]`;
+      const target = formRef.current?.querySelector(selector);
+      if (target?.focus) {
+        target.focus();
+        target.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    });
+  };
   function pick(e) {
     const x = e.target.files?.[0];
     if (!x) return;
@@ -630,6 +655,20 @@ function Register({
         "과목명이 없거나 부정확한 항목을 수정한 후 저장해주세요.",
       );
     if (!rows.length) return setError("저장할 수업을 추가해주세요.");
+    const requiredFields = ["subject", "professor", "classroom"];
+    const missingRowIndex = rows.findIndex((row) =>
+      requiredFields.some((field) => !String(row?.[field] || "").trim()),
+    );
+    if (missingRowIndex !== -1) {
+      const missingField = requiredFields.find(
+        (field) => !String(rows[missingRowIndex]?.[field] || "").trim(),
+      );
+      setError(
+        "저장 전에 과목명, 교수명, 강의실을 모두 입력해주세요. 비어 있는 항목으로 이동합니다.",
+      );
+      if (missingField) focusField(missingRowIndex, missingField);
+      return;
+    }
     const usefulRows = rows.filter(isUsefulCourse);
     const now = new Date().toISOString();
     const year = Number(selectedTimetable?.year ?? getCurrentYear());
@@ -767,7 +806,7 @@ function Register({
             )}
           </div>
         )}
-        <form onSubmit={save}>
+        <form ref={formRef} onSubmit={save}>
           {mode === "ocr" && !editRow
             ? colorGroups.map((group, i) => (
                 <ColorGroupEditor
