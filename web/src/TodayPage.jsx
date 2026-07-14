@@ -1,0 +1,71 @@
+import React, { useEffect, useMemo, useState } from "react"
+import { CalendarDays, Clock3, MapPin, RefreshCw } from "lucide-react"
+import { supabase } from "./supabase"
+import { getAcademicCalendar } from "./academicApi"
+import { buildTodayView, DAY_NAMES } from "./today"
+import "./today.css"
+
+export default function TodayPage() {
+  const [data, setData] = useState({ timetable: [], schedules: [], loading: true, error: "" })
+  const [now, setNow] = useState(new Date())
+  async function load(force = false) {
+    setData((value) => ({ ...value, loading: true, error: "" }))
+    try {
+      const { data: authData, error: authError } = await supabase.auth.getUser()
+      if (authError || !authData.user) throw authError || new Error("로그인 사용자 정보를 확인할 수 없습니다.")
+      const savedTimetableId = Number(localStorage.getItem("kmu-active-timetable-id"))
+      let collectionQuery = supabase
+        .from("timetable_collections")
+        .select("id")
+        .eq("user_id", authData.user.id)
+      if (Number.isFinite(savedTimetableId) && savedTimetableId > 0) {
+        collectionQuery = collectionQuery.eq("id", savedTimetableId)
+      } else {
+        collectionQuery = collectionQuery.order("updated_at", { ascending: false }).limit(1)
+      }
+      const { data: collections, error: collectionError } = await collectionQuery
+      if (collectionError) throw collectionError
+      const activeTimetableId = collections?.[0]?.id
+      const [calendar, timetable] = await Promise.all([
+        getAcademicCalendar(force),
+        activeTimetableId
+          ? supabase.from("timetables").select("*").eq("user_id", authData.user.id).eq("timetable_id", activeTimetableId).order("weekday").order("start_time")
+          : Promise.resolve({ data: [], error: null }),
+      ])
+      if (timetable.error) throw timetable.error
+      const rows = (timetable.data || []).map((row) => ({
+        ...row,
+        subject: row.subject || row.name || "강의명 없음",
+        weekday: Number(row.weekday),
+        start_time: String(row.start_time || "").slice(0, 5),
+        end_time: String(row.end_time || "").slice(0, 5),
+      })).filter((row) => Number.isInteger(row.weekday) && row.weekday >= 0 && row.weekday <= 6 && /^\d{2}:\d{2}$/.test(row.start_time) && /^\d{2}:\d{2}$/.test(row.end_time))
+      setData({ timetable: rows, schedules: calendar.schedules || [], loading: false, error: "" })
+    } catch (error) {
+      console.error("오늘 수업 데이터 요청 실패", { error, academicUrl: "http://localhost:8000/api/v1/academic-calendar", timetableTable: "timetables" })
+      setData((value) => ({ ...value, timetable: [], loading: false, error: error?.message || "수업 정보를 불러오지 못했습니다." }))
+    }
+  }
+  useEffect(() => { load() }, [])
+  useEffect(() => { const timer = window.setInterval(() => setNow(new Date()), 60_000); return () => window.clearInterval(timer) }, [])
+  const view = useMemo(() => buildTodayView(data.timetable, data.schedules, now), [data.timetable, data.schedules, now])
+  const dateLabel = now.toLocaleDateString("ko-KR", { year: "numeric", month: "long", day: "numeric", weekday: "long" })
+
+  return <div className="today-page">
+    <section className="today-hero"><div><p>오늘 수업</p><h1>{dateLabel}</h1><span>학사일정과 개인 시간표를 반영한 실제 수업입니다.</span></div><button onClick={() => load(true)} disabled={data.loading}><RefreshCw />{data.loading ? "불러오는 중" : "새로고침"}</button></section>
+    {data.error && <div className="today-error">{data.error}</div>}
+    <section className="today-summary">
+      <article><span>적용 요일</span><b>{DAY_NAMES[view.appliedWeekday]}요일</b><small>실제 {DAY_NAMES[view.actualWeekday]}요일</small></article>
+      <article><span>다음 수업</span><b>{view.next?.subject || (view.active ? "현재 수업 진행 중" : "오늘 남은 수업 없음")}</b><small>{view.next ? `${view.next.start_time.slice(0, 5)} · ${view.next.classroom || "강의실 미정"}` : "-"}</small></article>
+      <article><span>남은 시간</span><b>{view.remaining}</b><small>{view.active ? `${view.active.subject} 진행 중` : view.next ? `${view.next.subject} 시작까지` : "모든 수업 완료"}</small></article>
+      <article><span>변경 안내</span><b>{view.notices.length ? `${view.notices.length}건` : "변경 없음"}</b><small>{view.notices[0] || "공식 변경 정보가 없습니다."}</small></article>
+    </section>
+    {view.notices.length > 0 && <section className="today-notices">{view.notices.map((notice) => <p key={notice}>{notice}</p>)}</section>}
+    <section className="today-lessons"><header><div><CalendarDays /><h2>오늘 수업 목록</h2></div><span>{view.lessons.length}개 수업</span></header>
+      {data.loading ? <div className="today-empty">수업 정보를 불러오는 중입니다.</div> : data.error ? <div className="today-empty">수업 정보를 불러오지 못했습니다.</div> : !data.timetable.length ? <div className="today-empty">등록된 시간표가 없습니다.</div> : !view.lessons.length ? <div className="today-empty">오늘 예정된 수업이 없습니다.</div> : view.lessons.map((lesson) => <article key={lesson.id} className={lesson.status === "휴강" ? "cancelled" : ""}>
+        <time><b>{lesson.start_time.slice(0, 5)}</b><span>{lesson.end_time.slice(0, 5)}</span></time><i style={{ background: lesson.color || "#356AE6" }} />
+        <div><div className="lesson-title"><h3>{lesson.subject}</h3><em className={`lesson-${lesson.status}`}>{lesson.status === "정규" ? lesson.timeStatus : lesson.status}</em></div><p><MapPin />{lesson.classroom || "강의실 미정"}<span>·</span>{lesson.professor || "담당 교수 미정"}</p></div>
+      </article>)}
+    </section>
+  </div>
+}

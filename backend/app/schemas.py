@@ -46,6 +46,23 @@ class ScheduleOut(ScheduleIn, ORM):
 class AcademicOut(ORM):
     id: int; title: str; start_date: date; end_date: date; event_type: str; applied_weekday: int | None
 
+class SchoolEventOut(ORM):
+    id: int
+    title: str
+    summary: str = ""
+    category: str = "event"
+    source_type: str = "school"
+    interests: str = ""
+    department: str = ""
+    location: str = ""
+    starts_at: datetime
+    ends_at: datetime
+    apply_deadline: datetime | None = None
+    url: str = ""
+    apply_url: str = ""
+    is_favorite: bool = False
+    recommendation_reason: str = ""
+
 class TodayCourse(BaseModel):
     course_id: int; name: str; professor: str; classroom: str; start_time: time; end_time: time
 

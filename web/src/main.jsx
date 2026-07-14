@@ -1156,11 +1156,16 @@ function DashboardLegacy({ session }) {
   );
 }
 */
+const ACTIVE_TIMETABLE_KEY = "kmu-active-timetable-id";
+
 function Dashboard({ session }) {
   const [profile, setProfile] = useState(),
     [timetables, setTimetables] = useState([]),
     [rows, setRows] = useState([]),
-    [selectedTimetableId, setSelectedTimetableId] = useState(null),
+    [selectedTimetableId, setSelectedTimetableId] = useState(() => {
+      const saved = Number(localStorage.getItem(ACTIVE_TIMETABLE_KEY));
+      return Number.isFinite(saved) && saved > 0 ? saved : null;
+    }),
     [creatingTimetable, setCreatingTimetable] = useState(false),
     [editingTimetable, setEditingTimetable] = useState(null),
     [isTimetableListOpen, setIsTimetableListOpen] = useState(false),
@@ -1217,6 +1222,7 @@ function Dashboard({ session }) {
   useEffect(() => {
     if (!sortedTimetables.length) {
       setSelectedTimetableId(null);
+      localStorage.removeItem(ACTIVE_TIMETABLE_KEY);
       return;
     }
     if (
@@ -1226,6 +1232,12 @@ function Dashboard({ session }) {
       return;
     setSelectedTimetableId(sortedTimetables[0].id);
   }, [sortedTimetables, selectedTimetableId]);
+
+  useEffect(() => {
+    if (selectedTimetable?.id) {
+      localStorage.setItem(ACTIVE_TIMETABLE_KEY, String(selectedTimetable.id));
+    }
+  }, [selectedTimetable?.id]);
 
   async function createTimetable({ year, semester, title, titleCustom }) {
     const { data, error: insertError } = await supabase

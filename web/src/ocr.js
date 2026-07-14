@@ -6,10 +6,6 @@ import {
   normalizeCourseName,
   removeRepeatedWords,
 } from "./ocr-normalize";
-import {
-  harmonizeClassroomsBySubject as harmonizeRecognizedClassrooms,
-  parseClassroom as parseFinalClassroom,
-} from "./ocr-classroom-harmonize.js";
 
 const dayNames = ["월", "화", "수", "목", "금"],
   dayMap = { 월: 0, 화: 1, 수: 2, 목: 3, 금: 4, 토: 5, 일: 6 },
@@ -539,43 +535,34 @@ const scoreCanonicalStart = (minutesValue) =>
 const inferBaseStartMinutes = (grid, blocks) => {
   const pixelsPer15Minutes = Math.max(1, (grid.medianGap || grid.rowHeight || 60) / 4),
     candidates = [];
-  for (
-    let baseMinutes = timetableStartHour * 60 - 30;
-    baseMinutes <= timetableStartHour * 60 + 90;
-    baseMinutes += 15
-  )
-    for (let slotOffset = -8; slotOffset <= 8; slotOffset += 1) {
-      const blockScores = blocks.map((block) => {
-        const rawRelativeY = block.y0 - grid.firstTimeRowTop,
-          rawSlotIndex = rawRelativeY / pixelsPer15Minutes,
-          finalSlotIndex = Math.round(rawSlotIndex),
-          correctedSlotIndex = finalSlotIndex + slotOffset,
-          resultMinutes = baseMinutes + correctedSlotIndex * quarterHour,
-          canonicalDistance = scoreCanonicalStart(resultMinutes);
-        return {
-          rawRelativeY,
-          rawSlotIndex,
-          finalSlotIndex,
-          correctedSlotIndex,
-          resultMinutes,
-          canonicalDistance,
-        };
-      });
-      const score =
-        mean(
-          blockScores.map((item) => item.canonicalDistance),
-        ) +
-        mean(
-          blockScores.map((item) =>
-            item.resultMinutes >= 9 * 60 && item.resultMinutes <= 18 * 60
-              ? 0
-              : 90,
-          ),
-        ) +
-        Math.abs(baseMinutes - timetableStartHour * 60) * 0.35 +
-        Math.abs(slotOffset) * 3;
-      candidates.push({ baseMinutes, slotOffset, score, blockScores });
-    }
+  for (let baseMinutes = 8 * 60; baseMinutes <= 12 * 60; baseMinutes += 15) {
+    const blockScores = blocks.map((block) => {
+      const rawRelativeY = block.y0 - grid.firstTimeRowTop,
+        rawSlotIndex = rawRelativeY / pixelsPer15Minutes,
+        finalSlotIndex = Math.round(rawSlotIndex),
+        resultMinutes = baseMinutes + finalSlotIndex * quarterHour,
+        canonicalDistance = scoreCanonicalStart(resultMinutes);
+      return {
+        rawRelativeY,
+        rawSlotIndex,
+        finalSlotIndex,
+        resultMinutes,
+        canonicalDistance,
+      };
+    });
+    const score =
+      mean(
+        blockScores.map((item) => item.canonicalDistance),
+      ) +
+      mean(
+        blockScores.map((item) =>
+          item.resultMinutes >= 9 * 60 && item.resultMinutes <= 18 * 60
+            ? 0
+            : 90,
+        ),
+      );
+    candidates.push({ baseMinutes, score, blockScores });
+  }
   return candidates.sort((a, b) => a.score - b.score)[0];
 };
 
@@ -911,39 +898,6 @@ const courseCandidateScore = (candidate) => {
   );
 };
 
-const hasVerticalRomanGlyphAfterEnglish = (rawWords = [], height = 1) =>
-  rawWords.some((word, wordIndex, words) => {
-    const upper = String(word.text || "").toUpperCase(),
-      previous = words[wordIndex - 1]?.text?.toUpperCase?.() || "";
-    return (
-      previous === "ENGLISH" &&
-      ["I", "L", "|", "1", "!"].includes(upper) &&
-      word.y < height * 0.65
-    );
-  });
-
-const buildCourseCandidateFromWords = (rawWords = [], height = 1) =>
-  normalizeCourseName([
-    rawWords
-      .filter((word) => {
-        const text = String(word.text || "").trim(),
-          relativeY = height ? word.y / height : 0;
-        return (
-          text &&
-          relativeY < 0.72 &&
-          !isLikelyClassroom(text) &&
-          !/^\d{3,5}$/.test(text)
-        );
-      })
-      .sort((a, b) => a.y - b.y || a.x - b.x)
-      .map((word) =>
-        /\bENGLISH\s+[lI|1]\b/i.test(word.text)
-          ? word.text.replace(/\bENGLISH\s+[lI|1]\b/i, "ENGLISH I")
-          : word.text,
-      )
-      .join(" "),
-  ]);
-
 const pickCourseCandidate = (candidates) =>
   candidates
     .map((candidate) => normalizeCourseName([candidate]))
@@ -951,39 +905,19 @@ const pickCourseCandidate = (candidates) =>
     .sort((a, b) => courseCandidateScore(b) - courseCandidateScore(a))[0] ||
   "인식되지 않은 수업";
 
-const prefixCandidateMeta = (candidate) =>
-  typeof candidate === "string"
-    ? { text: candidate, kind: "unknown", confidence: 0 }
-    : {
-        text: candidate?.text || "",
-        kind: candidate?.kind || "unknown",
-        confidence: candidate?.confidence ?? 0,
-      };
-
-const scorePrefixCandidate = (candidate) => {
-  const { text: rawText, kind, confidence } = prefixCandidateMeta(candidate),
-    value = normalizeClassroom(rawText).replace(/\d+/g, "").trim();
-  return (
-    (/^[\uAC00-\uD7A3]{1,3}$/.test(value) ? 8 : 0) +
-    (/^[A-Za-z]$/.test(value) ? 0.5 : 0) -
-    (/^[A-Za-z]{2,}$/.test(value) ? 8 : 0) -
-    (/\d/.test(value) ? 4 : 0) -
-    (/[^A-Za-z\uAC00-\uD7A3]/.test(value) ? 3 : 0) +
-    (kind === "color" ? 1.5 : 0) +
-    (kind === "scaled" ? 1 : 0) -
-    (kind === "inverted" ? 1 : 0) +
-    confidence * 2
-  );
-};
+const scorePrefixCandidate = (value) =>
+  (/^[\uAC00-\uD7A3]{1,3}$/.test(value) ? 6 : 0) +
+  (/^[A-Za-z]{1,2}$/.test(value) ? 1 : 0) -
+  (/^[A-Za-z]{3,}$/.test(value) ? 4 : 0) -
+  (/\d/.test(value) ? 3 : 0) -
+  (/[^A-Za-z\uAC00-\uD7A3]/.test(value) ? 2 : 0);
 
 const pickPrefixCandidate = (candidates) =>
   candidates
-    .map(prefixCandidateMeta)
-    .map((candidate) => ({
-      ...candidate,
-      text: normalizeClassroom(candidate.text).replace(/\d+/g, "").trim(),
-    }))
-    .filter((candidate) => candidate.text)
+    .map((candidate) => normalizeClassroom(candidate))
+    .filter(Boolean)
+    .map((candidate) => candidate.replace(/\d+/g, "").trim())
+    .filter(Boolean)
     .sort((a, b) => scorePrefixCandidate(b) - scorePrefixCandidate(a))[0] || "";
 
 const pickNumberCandidate = (candidates) =>
@@ -998,118 +932,15 @@ const restoreClassroomPrefix = (room, prefixCandidates, numberCandidates) => {
     prefix = pickPrefixCandidate(prefixCandidates),
     number = pickNumberCandidate([normalized, ...numberCandidates]);
   if (!number) return { classroom: normalized, needsReview: !normalized };
-  if (/^[\uAC00-\uD7A3]{1,3}\d{3}$/.test(normalized))
-    return {
-      classroom: normalized,
-      needsReview: false,
-      classroomPrefixCandidate: normalized.replace(/\d{3}$/, ""),
-    };
-  if (/^[A-Za-z]{2,}\d{3}$/.test(normalized))
-    return {
-      classroom: number,
-      needsReview: true,
-      classroomPrefixCandidate: "",
-    };
-  if (/^[\uAC00-\uD7A3]{1,3}$/.test(prefix.text))
-    return {
-      classroom: `${prefix.text}${number}`,
-      needsReview: false,
-      classroomPrefixCandidate: prefix.text,
-    };
+  if (prefix) return { classroom: `${prefix}${number}`, needsReview: false };
   if (/^\d{4}$/.test(normalized))
     return { classroom: number, needsReview: true, classroomPrefixCandidate: "" };
   if (/^\d{3}$/.test(normalized))
     return { classroom: normalized, needsReview: true, classroomPrefixCandidate: "" };
-  return {
-    classroom: normalized,
-    needsReview: !normalized || /^\d{3,4}$/.test(normalized),
-    classroomPrefixCandidate: "",
-  };
+  return { classroom: normalized, needsReview: !normalized };
 };
 
-const subjectNormalizationKey = (value) =>
-  normalizeCourseName([value]).toUpperCase().trim();
-
-const classroomParts = (value) => {
-  const normalized = normalizeClassroom(value),
-    match = normalized.match(/^([\uAC00-\uD7A3A-Za-z]{0,10})\s*(\d{3})$/);
-  if (match) {
-    return {
-      normalized,
-      prefix: (match[1] || "").trim(),
-      number: match[2],
-    };
-  }
-  const trailingNumber = normalized.match(/(\d{3})$/);
-  return {
-    normalized,
-    prefix: normalized.replace(/\d+$/, "").trim(),
-    number: trailingNumber?.[1] || "",
-  };
-};
-
-const scoreResolvedClassroom = (value) => {
-  const { prefix, number, normalized } = classroomParts(value);
-  return (
-    (/^[\uAC00-\uD7A3]{1,3}$/.test(prefix) ? 8 : 0) +
-    (/^[A-Za-z]$/.test(prefix) ? 1 : 0) -
-    (/^[A-Za-z]{2,}$/.test(prefix) ? 6 : 0) +
-    (/^\d{3}$/.test(number) ? 4 : 0) -
-    (!normalized ? 6 : 0)
-  );
-};
-
-const harmonizeClassroomsBySubject = (events) => {
-  const subjectRoomMap = new Map();
-  for (const event of events) {
-    const subjectKey = subjectNormalizationKey(event.courseName),
-      room = classroomParts(event.classroom);
-    if (!subjectKey || !room.number) continue;
-    const roomKey = `${subjectKey}::${room.number}`,
-      current = subjectRoomMap.get(roomKey),
-      candidate = {
-        classroom: room.normalized,
-        prefix: room.prefix,
-        score: scoreResolvedClassroom(room.normalized),
-      };
-    if (!current || candidate.score > current.score) {
-      subjectRoomMap.set(roomKey, candidate);
-    }
-  }
-
-  return events.map((event, index) => {
-    const subjectKey = subjectNormalizationKey(event.courseName),
-      room = classroomParts(event.classroom);
-    if (!subjectKey || !room.number) return event;
-    const resolved = subjectRoomMap.get(`${subjectKey}::${room.number}`);
-    if (!resolved || !/^[\uAC00-\uD7A3]{1,3}$/.test(resolved.prefix)) return event;
-    if (room.normalized === resolved.classroom) return event;
-    if (room.prefix && /^[\uAC00-\uD7A3]{1,3}$/.test(room.prefix)) return event;
-
-    const nextEvent = {
-      ...event,
-      classroom: resolved.classroom,
-      needsReview: event.needsReview && room.normalized !== resolved.classroom,
-      _ocr: event._ocr
-        ? {
-            ...event._ocr,
-            classroom: resolved.classroom,
-            needsReview: event.needsReview && room.normalized !== resolved.classroom,
-          }
-        : event._ocr,
-    };
-    console.log("Subject classroom harmonization", {
-      blockIndex: index,
-      subjectKey,
-      originalClassroom: event.classroom,
-      harmonizedClassroom: resolved.classroom,
-      roomNumber: room.number,
-    });
-    return nextEvent;
-  });
-};
-
-const pickClassroomEntry = (candidates) =>
+const pickClassroomCandidate = (candidates) =>
   candidates
     .filter(Boolean)
     .map((candidate) => ({
@@ -1118,44 +949,10 @@ const pickClassroomEntry = (candidates) =>
       y: candidate.y ?? 0,
       height: candidate.height ?? 0,
       relativeY: candidate.relativeY ?? 0,
-      source: candidate.source || "room-line-unknown",
     }))
     .filter((candidate) => candidate.text)
     .sort((a, b) => classroomCandidateScore(b) - classroomCandidateScore(a))
-    .find((candidate) => classroomCandidateScore(candidate) > 1) || null;
-
-const findLikelyRoomLine = (roomVariantResults, roomCanvas, roomOrigin) => {
-  const colorResult =
-      roomVariantResults.find((result) => result.kind === "color") ||
-      roomVariantResults[0],
-    line =
-      colorResult?.lines
-        ?.map((candidate) => ({
-          ...candidate,
-          relativeY: candidate.y / Math.max(colorResult.height || roomCanvas.height, 1),
-        }))
-        .sort((a, b) => classroomCandidateScore(b) - classroomCandidateScore(a))[0] ||
-      null;
-  if (!line) return null;
-  return {
-    x0: clamp(roomOrigin.x + Math.floor(line.x) - 1, 0, roomOrigin.x + roomCanvas.width - 1),
-    y0: clamp(
-      roomOrigin.y + Math.floor(line.y - line.height / 2) - 1,
-      0,
-      roomOrigin.y + roomCanvas.height - 1,
-    ),
-    x1: clamp(
-      roomOrigin.x + Math.ceil(line.x + line.width) + 1,
-      roomOrigin.x,
-      roomOrigin.x + roomCanvas.width - 1,
-    ),
-    y1: clamp(
-      roomOrigin.y + Math.ceil(line.y + line.height / 2) + 1,
-      roomOrigin.y,
-      roomOrigin.y + roomCanvas.height - 1,
-    ),
-  };
-};
+    .find((candidate) => classroomCandidateScore(candidate) > 1)?.text || "";
 
 const classifyBlockText = (
   variantResults,
@@ -1203,9 +1000,6 @@ const classifyBlockText = (
     courseVariantCandidates = [
       courseCandidates.join(" "),
       ...variantResults.map((result) =>
-        buildCourseCandidateFromWords(result.rawWords || [], result.height),
-      ),
-      ...variantResults.map((result) =>
         result.lines
           .filter((line) => {
             const relativeY = result.height ? line.y / result.height : 0;
@@ -1228,7 +1022,6 @@ const classifyBlockText = (
           y: line.y,
           height: line.height,
           relativeY: line.relativeY,
-          source: "block-line",
         })),
       ...roomVariantResults.flatMap((result) =>
         result.lines.map((line) => ({
@@ -1237,7 +1030,6 @@ const classifyBlockText = (
           y: line.y,
           height: line.height,
           relativeY: line.y / Math.max(result.height, 1),
-          source: `room-line-${result.kind}`,
         })),
       ),
     ],
@@ -1249,60 +1041,35 @@ const classifyBlockText = (
               .filter((line) => !isLikelyClassroom(line) && !/\d{3,5}/.test(line))
               .slice(0, 2),
       ) || "인식되지 않은 수업",
-    classroomEntry = pickClassroomEntry(classroomCandidates),
-    classroomCandidate = classroomEntry?.text || "",
+    classroomCandidate = pickClassroomCandidate(classroomCandidates),
     hasVerticalGlyphAfterEnglish = variantResults.some((result) =>
-      hasVerticalRomanGlyphAfterEnglish(result.rawWords || [], result.height),
+      (result.rawWords || []).some((word, wordIndex, words) => {
+        const upper = String(word.text || "").toUpperCase(),
+          previous = words[wordIndex - 1]?.text?.toUpperCase?.() || "";
+        return (
+          previous === "ENGLISH" &&
+          ["I", "L", "|", "1", "!"].includes(upper) &&
+          word.y < result.height * 0.65
+        );
+      }),
     ),
     finalCourseName =
       courseName === "COLLEGE ENGLISH" && hasVerticalGlyphAfterEnglish
         ? "COLLEGE ENGLISH I"
         : courseName,
-    prefixCandidatesDetailed = prefixVariantResults.flatMap((result) =>
-      result.rawLines.map((candidate) => ({
-        text: normalizeClassroom(candidate).replace(/\d+/g, "").trim(),
-        kind: result.kind,
-        source: `prefix-${result.kind}`,
-        confidence: result.confidence,
-        isDerived: false,
-        needsReview: false,
-      })),
-    ),
     prefixScoreTrace = prefixVariantResults.flatMap((result) =>
       result.rawLines.map((candidate) => ({
         candidate,
         score: scorePrefixCandidate(
-          {
-            text: candidate,
-            kind: result.kind,
-            confidence: result.confidence,
-          },
+          normalizeClassroom(candidate).replace(/\d+/g, "").trim(),
         ),
       })),
     ),
     restoredClassroom = restoreClassroomPrefix(
       classroomCandidate,
-      prefixCandidatesDetailed,
+      prefixVariantResults.flatMap((result) => result.rawLines),
       numberVariantResults.flatMap((result) => result.rawLines),
     ),
-    rawRoomCandidates = [
-      ...classroomCandidates.map((candidate) => ({
-        text: candidate.text,
-        source: candidate.source || "room-line-unknown",
-        confidence: candidate.confidence ?? 0,
-        isDerived: false,
-        needsReview: false,
-      })),
-      ...numberVariantResults.flatMap((result) =>
-        result.rawLines.map((candidate) => ({
-          text: candidate,
-          source: `number-${result.kind}`,
-          confidence: result.confidence,
-          isDerived: false,
-          needsReview: false,
-        })),
-      ),
-    ],
     confidence = Math.max(
       ...variantResults.map((result) => result.confidence || 0),
       courseName === "인식되지 않은 수업" ? 0.35 : 0.6,
@@ -1348,19 +1115,6 @@ const classifyBlockText = (
     needsReview:
       restoredClassroom.needsReview || finalCourseName === "인식되지 않은 수업",
     classroomPrefixCandidate: restoredClassroom.classroomPrefixCandidate || "",
-    roomConfidence: classroomEntry?.confidence ?? 0,
-    prefixConfidence:
-      prefixCandidatesDetailed.find(
-        (candidate) =>
-          candidate.text === (restoredClassroom.classroomPrefixCandidate || ""),
-      )?.confidence ?? 0,
-    prefixSource:
-      prefixCandidatesDetailed.find(
-        (candidate) =>
-          candidate.text === (restoredClassroom.classroomPrefixCandidate || ""),
-      )?.source || "",
-    rawRoomCandidates,
-    prefixCandidates: prefixCandidatesDetailed,
     rawText: mergedRaw,
   };
 };
@@ -1373,22 +1127,15 @@ const analyzeBlock = async (worker, sourceCanvas, block) => {
       y0: Math.round(block.y0 + (block.y1 - block.y0 + 1) * 0.55),
       y1: block.y1,
     },
-    roomCanvas = cropCanvas(sourceCanvas, roomBlock, 1),
-    roomOrigin = {
-      x: Math.max(0, roomBlock.x0 - 1),
-      y: Math.max(0, roomBlock.y0 - 1),
-    },
-    roomVariants = makeRecognitionVariants(roomCanvas),
+    prefixCanvas = cropCanvasRelative(sourceCanvas, roomBlock, 0, 0, 0.35, 1, 1),
+    numberCanvas = cropCanvasRelative(sourceCanvas, roomBlock, 0.35, 0, 0.65, 1, 1),
+    roomVariants = makeRecognitionVariants(cropCanvas(sourceCanvas, roomBlock, 1)),
+    prefixVariants = makeRecognitionVariants(prefixCanvas),
+    numberVariants = makeRecognitionVariants(numberCanvas),
     variantResults = [],
     roomVariantResults = [],
     prefixVariantResults = [],
     numberVariantResults = [];
-  let prefixCanvas = cropCanvasRelative(sourceCanvas, roomBlock, 0, 0, 0.28, 1, 1),
-    numberCanvas = cropCanvasRelative(sourceCanvas, roomBlock, 0.22, 0, 0.78, 1, 1);
-  await worker.setParameters({
-    preserve_interword_spaces: "1",
-    tessedit_pageseg_mode: "6",
-  });
   for (const variant of variants) {
     const result = await worker.recognize(variant.canvas, {}, { text: true, blocks: true }),
       words = wordsOf(result?.data),
@@ -1414,10 +1161,6 @@ const analyzeBlock = async (worker, sourceCanvas, block) => {
       height: variant.canvas.height,
     });
   }
-  await worker.setParameters({
-    preserve_interword_spaces: "1",
-    tessedit_pageseg_mode: "7",
-  });
   for (const variant of roomVariants) {
     const result = await worker.recognize(variant.canvas, {}, { text: true, blocks: true }),
       words = wordsOf(result?.data),
@@ -1442,17 +1185,6 @@ const analyzeBlock = async (worker, sourceCanvas, block) => {
       height: variant.canvas.height,
     });
   }
-  const roomLineBlock = findLikelyRoomLine(roomVariantResults, roomCanvas, roomOrigin);
-  if (roomLineBlock) {
-    prefixCanvas = cropCanvasRelative(sourceCanvas, roomLineBlock, 0, 0, 0.24, 1, 1);
-    numberCanvas = cropCanvasRelative(sourceCanvas, roomLineBlock, 0.18, 0, 0.82, 1, 1);
-  }
-  const prefixVariants = makeRecognitionVariants(prefixCanvas),
-    numberVariants = makeRecognitionVariants(numberCanvas);
-  await worker.setParameters({
-    preserve_interword_spaces: "0",
-    tessedit_pageseg_mode: "10",
-  });
   for (const variant of prefixVariants) {
     const result = await worker.recognize(variant.canvas, {}, { text: true, blocks: true });
     prefixVariantResults.push({
@@ -1465,10 +1197,6 @@ const analyzeBlock = async (worker, sourceCanvas, block) => {
         result?.data?.confidence != null ? result.data.confidence / 100 : 0,
     });
   }
-  await worker.setParameters({
-    preserve_interword_spaces: "0",
-    tessedit_pageseg_mode: "7",
-  });
   for (const variant of numberVariants) {
     const result = await worker.recognize(variant.canvas, {}, { text: true, blocks: true });
     numberVariantResults.push({
@@ -1533,11 +1261,10 @@ const createEvent = (block, textInfo, grid, baseTime, pixels, w, index) => {
       Math.abs(rawDurationSlots - 5) <= 1 ? 5 : clamp(rawDurationSlots, 3, 8),
     rawRelativeY = block.y0 - grid.firstTimeRowTop,
     rawSlotIndex = rawRelativeY / pixelsPer15MinuteSlot,
-    slotOffset = baseTime?.slotOffset ?? 0,
+    slotOffset = Math.round(rawSlotIndex) - startSlotIndex,
     finalSlotIndex = Math.round(rawSlotIndex),
-    correctedSlotIndex = finalSlotIndex + slotOffset,
     baseStartMinutes = baseTime?.baseMinutes ?? timetableStartHour * 60,
-    resultMinutes = baseStartMinutes + correctedSlotIndex * quarterHour,
+    resultMinutes = baseStartMinutes + finalSlotIndex * quarterHour,
     snappedStartMinutes = canonicalClassStartMinutes.reduce((best, candidate) =>
       Math.abs(candidate - resultMinutes) < Math.abs(best - resultMinutes)
         ? candidate
@@ -1578,17 +1305,6 @@ const createEvent = (block, textInfo, grid, baseTime, pixels, w, index) => {
       weekday: columnIndex,
       start_time: startTime,
       end_time: endTime,
-      _ocrRoomMeta: {
-        originalClassroom: textInfo.classroom,
-        rawRoomCandidates: textInfo.rawRoomCandidates || [],
-        prefixCandidates: textInfo.prefixCandidates || [],
-        selectedPrefixBeforeHarmonization:
-          textInfo.classroomPrefixCandidate || "",
-        roomConfidence: textInfo.roomConfidence ?? textInfo.confidence ?? 0,
-        prefixConfidence: textInfo.prefixConfidence ?? 0,
-        prefixSource: textInfo.prefixSource || "",
-        isDerived: false,
-      },
       _ocr: null,
     };
   event._ocr = {
@@ -1638,7 +1354,6 @@ const createEvent = (block, textInfo, grid, baseTime, pixels, w, index) => {
     rawSlotIndex,
     slotOffset,
     finalSlotIndex,
-    correctedSlotIndex,
     baseStartMinutes,
     resultMinutes,
     mappedStartTime: startTime,
@@ -1646,17 +1361,6 @@ const createEvent = (block, textInfo, grid, baseTime, pixels, w, index) => {
   console.log(
     `[Time] block=${index} top=${block.y0} bottom=${block.y1} start=${startTime} end=${endTime} gridTop=${grid.scheduleGridBounds.y} gridBottom=${grid.scheduleGridBounds.y + grid.scheduleGridBounds.height}`,
   );
-  console.log("Schedule time validation", {
-    blockId: event.id,
-    day: event.day,
-    blockTop: block.y0,
-    blockHeight: boundingBox.height,
-    startTime,
-    endTime,
-    durationMinutes: minutes(endTime) - minutes(startTime),
-    expectedDurationMinutes: 75,
-    isDurationValid: minutes(endTime) - minutes(startTime) === 75,
-  });
   console.log("Final event validation", {
     blockIndex: index,
     courseName: event.courseName,
@@ -1795,36 +1499,6 @@ export async function recognizeTimetable(file, onProgress) {
       text = fallback?.data?.text || "";
       generatedEvents.push(...parseEverytimeText(text));
     }
-    const { events: finalEvents, logs: harmonizationLogs } =
-      harmonizeRecognizedClassrooms(generatedEvents);
-    harmonizationLogs.forEach((entry) =>
-      console.log("Subject classroom harmonization", entry),
-    );
-    finalEvents.forEach((event) => {
-      const parsedOriginal = parseFinalClassroom(
-          event._ocrRoomMeta?.originalClassroom || event.classroom,
-        ),
-        parsedFinal = parseFinalClassroom(event.classroom),
-        durationMinutes = minutes(event.endTime) - minutes(event.startTime);
-      console.log("Final event validation", {
-        blockId: event.id,
-        day: event.day,
-        startTime: event.startTime,
-        endTime: event.endTime,
-        durationMinutes,
-        courseName: event.courseName,
-        originalClassroom: event._ocrRoomMeta?.originalClassroom || event.classroom,
-        finalClassroom: event.classroom,
-        roomNumber: parsedFinal.roomNumber,
-        originalPrefix: parsedOriginal.prefix,
-        finalPrefix: parsedFinal.prefix,
-        prefixSource: event._ocrRoomMeta?.prefixSource || "",
-        prefixConfidence: event._ocrRoomMeta?.prefixConfidence ?? 0,
-        wasHarmonized: Boolean(event._ocrRoomMeta?.isDerived),
-        harmonizationGroupKey: event._ocrRoomMeta?.harmonizationGroupKey || "",
-        needsReview: event.needsReview,
-      });
-    });
     console.log("OCR timetable debug", {
       timetableBounds: shells.grid?.timetableBounds || null,
       detectedBlockCount: shells.blocks.length,
@@ -1837,10 +1511,10 @@ export async function recognizeTimetable(file, onProgress) {
       })),
       recognizedBlockCount: recognizedBlocks.length,
       recognizedBlocks,
-      generatedEventCount: finalEvents.length,
-      generatedEvents: finalEvents.map((event) => event._ocr || event),
+      generatedEventCount: generatedEvents.length,
+      generatedEvents: generatedEvents.map((event) => event._ocr || event),
     });
-    return { text, rows: finalEvents };
+    return { text, rows: generatedEvents };
   } catch (error) {
     console.error("OCR language/model error", error);
     throw error;

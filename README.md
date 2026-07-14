@@ -35,7 +35,7 @@ npm run dev
 
 브라우저에서 `http://localhost:5173`을 연다. 다른 API 주소를 사용할 때는 `web/.env.example`을 `web/.env`로 복사한 뒤 `VITE_API_URL`을 변경한다. 배포용 빌드는 `npm run build`이며 결과는 `web/dist`에 생성된다.
 
-Supabase Auth와 테이블 최초 설정은 `docs/SUPABASE_SETUP.md`를 따른다. 실행할 SQL은 `supabase/migrations/202607130001_profiles_and_timetables.sql`에 있다.
+Supabase Auth와 테이블 최초 설정은 `docs/SUPABASE_SETUP.md`를 따른다. `supabase/migrations`의 SQL을 파일명 순서대로 실행하면 프로필, 개인 일정, 학년도·학기별 시간표가 구성된다.
 
 Flutter 앱은 선택적으로 유지되어 있다. 필요하면 Flutter SDK에서 `cd frontend && flutter pub get && flutter run --dart-define=API_URL=http://10.0.2.2:8000/api/v1`을 실행한다.
 
