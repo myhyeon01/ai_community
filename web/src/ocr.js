@@ -6,10 +6,6 @@ import {
   normalizeCourseName,
   removeRepeatedWords,
 } from "./ocr-normalize";
-import {
-  harmonizeClassroomsBySubject as harmonizeRecognizedClassrooms,
-  parseClassroom as parseFinalClassroom,
-} from "./ocr-classroom-harmonize.js";
 
 const dayNames = ["월", "화", "수", "목", "금"],
   dayMap = { 월: 0, 화: 1, 수: 2, 목: 3, 금: 4, 토: 5, 일: 6 },
@@ -1250,7 +1246,7 @@ const classifyBlockText = (
               .slice(0, 2),
       ) || "인식되지 않은 수업",
     classroomEntry = pickClassroomEntry(classroomCandidates),
-    classroomCandidate = classroomEntry?.text || "",
+    classroomCandidate = "",
     hasVerticalGlyphAfterEnglish = variantResults.some((result) =>
       hasVerticalRomanGlyphAfterEnglish(result.rawWords || [], result.height),
     ),
@@ -1280,11 +1276,11 @@ const classifyBlockText = (
         ),
       })),
     ),
-    restoredClassroom = restoreClassroomPrefix(
-      classroomCandidate,
-      prefixCandidatesDetailed,
-      numberVariantResults.flatMap((result) => result.rawLines),
-    ),
+    restoredClassroom = {
+      classroom: "",
+      needsReview: true,
+      classroomPrefixCandidate: "",
+    },
     rawRoomCandidates = [
       ...classroomCandidates.map((candidate) => ({
         text: candidate.text,
@@ -1795,34 +1791,45 @@ export async function recognizeTimetable(file, onProgress) {
       text = fallback?.data?.text || "";
       generatedEvents.push(...parseEverytimeText(text));
     }
-    const { events: finalEvents, logs: harmonizationLogs } =
-      harmonizeRecognizedClassrooms(generatedEvents);
-    harmonizationLogs.forEach((entry) =>
-      console.log("Subject classroom harmonization", entry),
-    );
+    const finalEvents = generatedEvents.map((event) => ({
+      ...event,
+      classroom: "",
+      needsReview: true,
+      _ocrRoomMeta: {
+        ...(event._ocrRoomMeta || {}),
+        originalClassroom: "",
+        finalPrefix: "",
+        prefixSource: "",
+        prefixConfidence: 0,
+        isDerived: false,
+        harmonizationGroupKey: "",
+      },
+      _ocr: event._ocr
+        ? {
+            ...event._ocr,
+            classroom: "",
+            needsReview: true,
+          }
+        : event._ocr,
+    }));
     finalEvents.forEach((event) => {
-      const parsedOriginal = parseFinalClassroom(
-          event._ocrRoomMeta?.originalClassroom || event.classroom,
-        ),
-        parsedFinal = parseFinalClassroom(event.classroom),
-        durationMinutes = minutes(event.endTime) - minutes(event.startTime);
       console.log("Final event validation", {
         blockId: event.id,
         day: event.day,
         startTime: event.startTime,
         endTime: event.endTime,
-        durationMinutes,
+        durationMinutes: minutes(event.endTime) - minutes(event.startTime),
         courseName: event.courseName,
-        originalClassroom: event._ocrRoomMeta?.originalClassroom || event.classroom,
-        finalClassroom: event.classroom,
-        roomNumber: parsedFinal.roomNumber,
-        originalPrefix: parsedOriginal.prefix,
-        finalPrefix: parsedFinal.prefix,
-        prefixSource: event._ocrRoomMeta?.prefixSource || "",
-        prefixConfidence: event._ocrRoomMeta?.prefixConfidence ?? 0,
-        wasHarmonized: Boolean(event._ocrRoomMeta?.isDerived),
-        harmonizationGroupKey: event._ocrRoomMeta?.harmonizationGroupKey || "",
-        needsReview: event.needsReview,
+        originalClassroom: "",
+        finalClassroom: "",
+        roomNumber: "",
+        originalPrefix: "",
+        finalPrefix: "",
+        prefixSource: "",
+        prefixConfidence: 0,
+        wasHarmonized: false,
+        harmonizationGroupKey: "",
+        needsReview: true,
       });
     });
     console.log("OCR timetable debug", {
