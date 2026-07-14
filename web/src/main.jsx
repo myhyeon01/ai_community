@@ -397,7 +397,14 @@ function ColorGroupEditor({ group, index, update, remove }) {
           <b>색상 과목 {index + 1}</b>
           <span>{group.rows.length}개 수업</span>
         </div>
-        <button type="button" onClick={() => remove(group.key)}>
+        <button
+          type="button"
+          onClick={() => {
+            if (window.confirm("이 색상 그룹을 삭제할까요?")) {
+              remove(group.key);
+            }
+          }}
+        >
           <Trash2 />
           그룹 삭제
         </button>
