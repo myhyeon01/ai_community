@@ -50,12 +50,60 @@ function SettingSwitch({ checked, onChange, label }) {
 export default function NotificationPage() {
   const [settings, setSettings] = useState(() => ({ ...defaultSettings, ...readJson("kmu-notification-settings", {}) }));
   const [rows, setRows] = useState([]);
+  const [activeTimetableId, setActiveTimetableId] = useState(null);
   const [permission, setPermission] = useState(() => typeof Notification === "undefined" ? "unsupported" : Notification.permission);
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
-    supabase.from("timetables").select("*").order("weekday").order("start_time")
-      .then(({ data }) => setRows(data || []));
+    let cancelled = false;
+    async function load() {
+      try {
+        const { data: authData, error: authError } = await supabase.auth.getUser();
+        if (authError || !authData.user) {
+          if (!cancelled) setRows([]);
+          return;
+        }
+        const savedTimetableId = Number(localStorage.getItem("kmu-active-timetable-id"));
+        let collectionQuery = supabase
+          .from("timetable_collections")
+          .select("id")
+          .eq("user_id", authData.user.id);
+        if (Number.isFinite(savedTimetableId) && savedTimetableId > 0) {
+          collectionQuery = collectionQuery.eq("id", savedTimetableId);
+        } else {
+          collectionQuery = collectionQuery.order("updated_at", { ascending: false }).limit(1);
+        }
+        const { data: collections, error: collectionError } = await collectionQuery;
+        if (collectionError) throw collectionError;
+        const currentTimetableId = collections?.[0]?.id || null;
+        if (!currentTimetableId) {
+          if (!cancelled) {
+            setActiveTimetableId(null);
+            setRows([]);
+          }
+          return;
+        }
+        const { data: timetableRows, error: timetableError } = await supabase
+          .from("timetables")
+          .select("*")
+          .eq("user_id", authData.user.id)
+          .eq("timetable_id", currentTimetableId)
+          .order("weekday")
+          .order("start_time");
+        if (timetableError) throw timetableError;
+        if (!cancelled) {
+          setActiveTimetableId(currentTimetableId);
+          setRows(timetableRows || []);
+        }
+      } catch (error) {
+        console.error("알림 시간표 로드 실패", error);
+        if (!cancelled) setRows([]);
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const update = (key, value) => {
@@ -142,7 +190,7 @@ export default function NotificationPage() {
     }
 
     return items.sort((a, b) => Number(b.urgent) - Number(a.urgent) || a.sortAt - b.sortAt).slice(0, 18);
-  }, [rows, settings]);
+  }, [rows, settings, activeTimetableId]);
 
   useEffect(() => {
     if (permission !== "granted" || typeof Notification === "undefined") return undefined;
@@ -181,6 +229,6 @@ export default function NotificationPage() {
     <section className="notification-hero"><span><BellRing /></span><div><p>KMU SMART NOTIFICATION</p><h1>알림 설정</h1><small>수업과 학사일정, AI 계획의 중요한 순간만 놓치지 않도록 알려드립니다.</small></div><button type="button" onClick={requestPermission}>{permission === "granted" ? <CheckCircle2 /> : <Bell />} {permission === "granted" ? "브라우저 알림 사용 중" : "브라우저 알림 켜기"}</button></section>
     {notice && <p className="notification-notice" role="status">{notice}</p>}
     <section className="notification-settings">{settingCards.map(({ key, icon: Icon, title, text, control, important }) => <article className={important ? "important" : ""} key={key}><header><span><Icon /></span><SettingSwitch checked={settings[key]} onChange={(value) => update(key, value)} label={`${title} ${settings[key] ? "끄기" : "켜기"}`} /></header><h2>{title}{important && <i>중요 알림</i>}</h2><p>{text}</p>{control && <label>알림 기준{control}</label>}</article>)}</section>
-    <section className="notification-feed"><header><div><h2>예정된 알림</h2><p>현재 설정과 저장된 시간표·AI 계획을 기준으로 표시합니다.</p></div><span>{notifications.length}개</span></header><div>{notifications.length ? notifications.map((item) => { const Icon = iconFor(item.type); return <article className={item.urgent ? "urgent" : item.type} key={item.id}><span><Icon /></span><div><b>{item.title}</b><p>{item.detail}</p></div><time>{item.when}</time>{item.urgent && <i>필독</i>}</article>; }) : <div className="notification-empty"><Bell /><b>예정된 알림이 없습니다.</b><span>시간표나 AI 계획을 추가하면 여기에 표시됩니다.</span></div>}</div></section>
+    <section className="notification-feed"><header><div><h2>예정된 알림</h2><p>현재 선택된 시간표와 저장된 AI 계획을 기준으로 표시합니다.</p></div><span>{notifications.length}개</span></header><div>{notifications.length ? notifications.map((item) => { const Icon = iconFor(item.type); return <article className={item.urgent ? "urgent" : item.type} key={item.id}><span><Icon /></span><div><b>{item.title}</b><p>{item.detail}</p></div><time>{item.when}</time>{item.urgent && <i>필독</i>}</article>; }) : <div className="notification-empty"><Bell /><b>예정된 알림이 없습니다.</b><span>선택한 시간표나 AI 계획을 추가하면 여기에 표시됩니다.</span></div>}</div></section>
   </div>;
 }
