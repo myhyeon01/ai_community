@@ -692,6 +692,7 @@ function Register({
           `${duplicate.start_time.slice(0, 5)}-${duplicate.end_time.slice(0, 5)} ${duplicate.subject} 일정과 시간이 겹칩니다.`,
         );
     }
+    if (!window.confirm("수업을 저장할까요?")) return;
     const payload = rows.map((r) => ({
       subject: r.subject,
       professor: r.professor || "",
@@ -1369,6 +1370,7 @@ function Dashboard({ session }) {
   }
 
   async function removeCourse(id) {
+    if (!window.confirm("이 수업을 삭제할까요?")) return;
     const { error: deleteError } = await supabase
       .from("timetables")
       .delete()
@@ -1408,6 +1410,7 @@ function Dashboard({ session }) {
       .filter((row) => !isUsefulCourse(row))
       .map((row) => row.id);
     if (!invalidIds.length) return;
+    if (!window.confirm("선택한 잘못된 OCR 수업을 삭제할까요?")) return;
     const { error: deleteError } = await supabase
       .from("timetables")
       .delete()
