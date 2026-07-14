@@ -70,3 +70,13 @@ export function selectCurrentTimetable(collections, schedules, target = new Date
   return { term, timetable: preferred || matching[0] || null };
 }
 
+export function selectTimetableRowsForDate(rows, collections, schedules, target = new Date(), preferredId = null) {
+  const selection = selectCurrentTimetable(collections, schedules, target, preferredId);
+  const timetableId = Number(selection.timetable?.id);
+  return {
+    ...selection,
+    rows: Number.isFinite(timetableId)
+      ? (Array.isArray(rows) ? rows : []).filter((row) => Number(row.timetable_id) === timetableId)
+      : [],
+  };
+}

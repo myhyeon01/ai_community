@@ -6,6 +6,8 @@ import {
   normalizeCourseName,
   removeRepeatedWords,
 } from "./ocr-normalize";
+import { areSimilarCourseColors, parseHexColor } from "./ocr-color";
+import { durationSlotsFromPixels, inferGridStartHour } from "./ocr-time";
 
 const dayNames = ["월", "화", "수", "목", "금"],
   dayMap = { 월: 0, 화: 1, 수: 2, 목: 3, 금: 4, 토: 5, 일: 6 },
@@ -161,9 +163,9 @@ const estimateBackground = (pixels, w, h) => {
         hsv = rgbToHsv(r, g, b);
       if (hsv.s > 0.18) continue;
       const key = [
-        Math.round(r / 16) * 16,
-        Math.round(g / 16) * 16,
-        Math.round(b / 16) * 16,
+        clamp(Math.round(r / 16) * 16, 0, 255),
+        clamp(Math.round(g / 16) * 16, 0, 255),
+        clamp(Math.round(b / 16) * 16, 0, 255),
       ].join(",");
       bucket.set(key, (bucket.get(key) || 0) + 1);
     }
@@ -248,6 +250,7 @@ const fillMaskHoles = (mask, w, h) => {
 
 const buildForegroundMask = (pixels, w, h) => {
   const background = estimateBackground(pixels, w, h),
+    backgroundHsv = rgbToHsv(background.r, background.g, background.b),
     mask = new Uint8Array(w * h);
   for (let y = Math.floor(h * 0.08); y < h * 0.97; y++)
     for (let x = Math.floor(w * 0.08); x < Math.floor(w * 0.98); x++) {
@@ -257,11 +260,17 @@ const buildForegroundMask = (pixels, w, h) => {
         b = pixels[i + 2],
         hsv = rgbToHsv(r, g, b),
         distance = colorDistance({ r, g, b }, background),
+        valueDelta = Math.abs(hsv.v - backgroundHsv.v),
+        paleColoredFill =
+          distance > 24 &&
+          hsv.s > 0.045 &&
+          (valueDelta > 0.015 || hsv.s > 0.07),
         foreground =
-          distance > 30 &&
-          ((hsv.s > 0.12 && hsv.v > 0.3) ||
-            (distance > 45 && hsv.v > 0.22) ||
-            hsv.s > 0.22);
+          (distance > 30 &&
+            ((hsv.s > 0.12 && hsv.v > 0.3) ||
+              (distance > 45 && hsv.v > 0.22 && hsv.s > 0.03) ||
+              hsv.s > 0.22)) ||
+          paleColoredFill;
       if (foreground) mask[y * w + x] = 1;
     }
   return {
@@ -744,7 +753,103 @@ const dominantColorHex = (pixels, block, w) => {
     .sort((a, b) => b[1] - a[1])[0]?.[0]
     ?.split(",")
     .map(Number) || [100, 140, 200];
-  return `#${rgb.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+  return `#${rgb
+    .map((value) => clamp(value, 0, 255).toString(16).padStart(2, "0"))
+    .join("")}`;
+};
+
+const detectColoredColumnRuns = (pixels, w, h, grid, background) => {
+  const runs = [],
+    backgroundHsv = rgbToHsv(background.r, background.g, background.b),
+    scheduleTop = clamp(Math.round(grid.firstTimeRowTop), 0, h - 1),
+    scheduleBottom = clamp(Math.round(grid.lastTimeRowBottom), scheduleTop + 1, h - 1),
+    minimumHeight = Math.max(10, (grid.rowHeight || grid.medianGap || 60) * 0.25);
+
+  for (let column = 0; column < 5; column += 1) {
+    const columnLeft = grid.mondayColumnLeft + grid.columnWidth * column,
+      columnRight = columnLeft + grid.columnWidth,
+      x0 = clamp(Math.round(columnLeft + grid.columnWidth * 0.08), 0, w - 1),
+      x1 = clamp(Math.round(columnRight - grid.columnWidth * 0.08), x0 + 1, w - 1),
+      xStep = Math.max(2, Math.round((x1 - x0) / 36)),
+      activeRows = [];
+
+    for (let y = scheduleTop; y <= scheduleBottom; y += 1) {
+      let coloredCount = 0,
+        sampledCount = 0,
+        rowColorBuckets = new Map();
+      for (let x = x0; x <= x1; x += xStep) {
+        const pixelIndex = (y * w + x) * 4,
+          color = {
+            r: pixels[pixelIndex],
+            g: pixels[pixelIndex + 1],
+            b: pixels[pixelIndex + 2],
+          },
+          hsv = rgbToHsv(color.r, color.g, color.b),
+          distance = colorDistance(color, background),
+          valueDelta = Math.abs(hsv.v - backgroundHsv.v),
+          colored =
+            distance > 20 &&
+            hsv.s > 0.035 &&
+            (hsv.s > 0.065 || valueDelta > 0.018);
+        sampledCount += 1;
+        if (!colored) continue;
+        coloredCount += 1;
+        const colorKey = [color.r, color.g, color.b]
+          .map((value) => clamp(Math.round(value / 8) * 8, 0, 255))
+          .join(",");
+        rowColorBuckets.set(colorKey, (rowColorBuckets.get(colorKey) || 0) + 1);
+      }
+      // 글자가 블록 폭 대부분을 덮는 작은 캡처에서도 배경색 일부만 남아 있으면
+      // 같은 채색 행으로 본다. 무채색 격자선은 위의 채도 조건에서 이미 제외된다.
+      if (coloredCount / Math.max(sampledCount, 1) < 0.06) continue;
+      const rowColor = ([...rowColorBuckets.entries()]
+        .sort((left, right) => right[1] - left[1])[0]?.[0] || "0,0,0")
+        .split(",")
+        .map(Number);
+      activeRows.push({
+        y,
+        color: {
+          r: rowColor[0],
+          g: rowColor[1],
+          b: rowColor[2],
+        },
+      });
+    }
+
+    let current = null;
+    const finish = () => {
+      if (!current || current.y1 - current.y0 + 1 < minimumHeight) return;
+      runs.push({
+        x0: clamp(Math.round(columnLeft + 1), 0, w - 1),
+        x1: clamp(Math.round(columnRight - 1), 0, w - 1),
+        y0: current.y0,
+        y1: current.y1,
+        area:
+          (Math.round(columnRight - 1) - Math.round(columnLeft + 1) + 1)
+          * (current.y1 - current.y0 + 1),
+        averageColor: current.averageColor,
+      });
+    };
+    activeRows.forEach((row) => {
+      if (
+        !current ||
+        row.y - current.y1 > Math.max(4, Math.round(minimumHeight * 0.28))
+      ) {
+        finish();
+        current = { y0: row.y, y1: row.y, averageColor: row.color, count: 1 };
+        return;
+      }
+      current.y1 = row.y;
+      current.averageColor = {
+        r: Math.round((current.averageColor.r * current.count + row.color.r) / (current.count + 1)),
+        g: Math.round((current.averageColor.g * current.count + row.color.g) / (current.count + 1)),
+        b: Math.round((current.averageColor.b * current.count + row.color.b) / (current.count + 1)),
+      };
+      current.count += 1;
+    });
+    finish();
+  }
+  return runs.sort((left, right) => left.y0 - right.y0 || left.x0 - right.x0);
 };
 
 const cropCanvas = (sourceCanvas, block, padding = 2) => {
@@ -783,6 +888,217 @@ const cropCanvasRelative = (
   );
 };
 
+const otsuThreshold = (rgbaPixels) => {
+  const histogram = new Uint32Array(256);
+  let total = 0;
+  for (let index = 0; index < rgbaPixels.length; index += 4) {
+    histogram[rgbaPixels[index]] += 1;
+    total += 1;
+  }
+  let weightedTotal = 0;
+  for (let value = 0; value < 256; value += 1) {
+    weightedTotal += value * histogram[value];
+  }
+  let backgroundWeight = 0;
+  let backgroundSum = 0;
+  let maximumVariance = -1;
+  let selected = 150;
+  for (let value = 0; value < 256; value += 1) {
+    backgroundWeight += histogram[value];
+    if (!backgroundWeight) continue;
+    const foregroundWeight = total - backgroundWeight;
+    if (!foregroundWeight) break;
+    backgroundSum += value * histogram[value];
+    const backgroundMean = backgroundSum / backgroundWeight;
+    const foregroundMean = (weightedTotal - backgroundSum) / foregroundWeight;
+    const variance = backgroundWeight
+      * foregroundWeight
+      * (backgroundMean - foregroundMean) ** 2;
+    if (variance > maximumVariance) {
+      maximumVariance = variance;
+      selected = value;
+    }
+  }
+  return clamp(selected, 70, 205);
+};
+
+const makeBackgroundDifferenceCanvas = (canvas) => {
+  const output = createCanvas(canvas.width, canvas.height),
+    context = getImageContext(output);
+  context.drawImage(canvas, 0, 0);
+  const imageData = context.getImageData(0, 0, output.width, output.height),
+    pixels = imageData.data,
+    buckets = new Map();
+  for (let index = 0; index < pixels.length; index += 16) {
+    const color = [pixels[index], pixels[index + 1], pixels[index + 2]].map(
+      (value) => Math.round(value / 12) * 12,
+    ),
+      key = color.join(",");
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  }
+  const background = ([...buckets.entries()].sort((left, right) => right[1] - left[1])[0]?.[0]
+      || "255,255,255")
+    .split(",")
+    .map(Number),
+    sampledDistances = [];
+  for (let index = 0; index < pixels.length; index += 32) {
+    sampledDistances.push(
+      Math.sqrt(
+        (pixels[index] - background[0]) ** 2
+        + (pixels[index + 1] - background[1]) ** 2
+        + (pixels[index + 2] - background[2]) ** 2,
+      ),
+    );
+  }
+  sampledDistances.sort((left, right) => left - right);
+  const backgroundNoise = sampledDistances[Math.floor(sampledDistances.length * 0.55)] || 0,
+    differenceThreshold = clamp(backgroundNoise * 2.8, 22, 46);
+  for (let index = 0; index < pixels.length; index += 4) {
+    const distance = Math.sqrt(
+        (pixels[index] - background[0]) ** 2
+        + (pixels[index + 1] - background[1]) ** 2
+        + (pixels[index + 2] - background[2]) ** 2,
+      ),
+      value = distance > differenceThreshold ? 0 : 255;
+    pixels[index] = value;
+    pixels[index + 1] = value;
+    pixels[index + 2] = value;
+  }
+  context.putImageData(imageData, 0, 0);
+  return output;
+};
+
+const calibrateTimeAxis = async (worker, sourceCanvas, grid) => {
+  const rowLines = (grid.scheduleRowLines || []).filter(
+    (value) => value >= 0 && value < sourceCanvas.height,
+  );
+  if (rowLines.length < 2 || grid.mondayColumnLeft < 16) return null;
+
+  const cropTop = Math.max(
+      0,
+      Math.round(grid.firstTimeRowTop - (grid.rowHeight || grid.medianGap || 60) * 0.25),
+    ),
+    cropBottom = Math.min(
+      sourceCanvas.height - 1,
+      Math.round(grid.lastTimeRowBottom + (grid.rowHeight || grid.medianGap || 60) * 0.15),
+    ),
+    strip = cropCanvas(
+      sourceCanvas,
+      {
+        x0: 0,
+        y0: cropTop,
+        x1: Math.max(1, Math.round(grid.mondayColumnLeft - 2)),
+        y1: cropBottom,
+      },
+      0,
+    ),
+    scale = 3,
+    enlarged = createCanvas(strip.width * scale, strip.height * scale),
+    enlargedContext = getImageContext(enlarged);
+  enlargedContext.imageSmoothingEnabled = false;
+  enlargedContext.drawImage(strip, 0, 0, enlarged.width, enlarged.height);
+
+  await worker.setParameters({
+    preserve_interword_spaces: "0",
+    tessedit_char_whitelist: "0123456789",
+    tessedit_pageseg_mode: "11",
+  });
+  const result = await worker.recognize(enlarged, {}, { text: true, blocks: true }),
+    tolerance = Math.max(8, (grid.rowHeight || grid.medianGap || 60) * 0.48),
+    samples = wordsOf(result?.data)
+      .map((word) => {
+        const digits = wordText(word).replace(/\D/g, "");
+        if (!/^\d{1,2}$/.test(digits) || !word?.bbox) return null;
+        const hour = Number(digits);
+        if (hour < 1 || hour > 24) return null;
+        const sourceY = cropTop + (word.bbox.y0 + word.bbox.y1) / (2 * scale);
+        const nearest = rowLines.reduce(
+          (best, y, rowIndex) =>
+            Math.abs(y - sourceY) < best.distance
+              ? { rowIndex, y, distance: Math.abs(y - sourceY) }
+              : best,
+          { rowIndex: -1, y: 0, distance: Number.POSITIVE_INFINITY },
+        );
+        if (nearest.rowIndex < 0 || nearest.distance > tolerance) return null;
+        return {
+          hour,
+          rowIndex: nearest.rowIndex,
+          sourceY,
+          lineY: nearest.y,
+          confidence: word.confidence != null ? word.confidence / 100 : 0,
+        };
+      })
+      .filter(Boolean),
+    startHour = samples.length >= 2 ? inferGridStartHour(samples) : null,
+    orderedSamples = [...samples].sort((left, right) => left.sourceY - right.sourceY),
+    distinctSamples = [],
+    unwrappedSamples = [],
+    pixelSlopes = [],
+    sequentialGaps = [];
+  orderedSamples.forEach((sample) => {
+    const previous = distinctSamples.at(-1),
+      duplicateTolerance = Math.max(10, (grid.rowHeight || grid.medianGap || 60) * 0.25);
+    if (previous && Math.abs(previous.sourceY - sample.sourceY) < duplicateTolerance) {
+      if (sample.confidence > previous.confidence) distinctSamples[distinctSamples.length - 1] = sample;
+    } else {
+      distinctSamples.push(sample);
+    }
+  });
+  distinctSamples.forEach((sample) => {
+    let absoluteHour = sample.hour;
+    const previousHour = unwrappedSamples.at(-1)?.absoluteHour;
+    while (previousHour != null && absoluteHour <= previousHour) absoluteHour += 12;
+    if (previousHour != null && absoluteHour - previousHour > 4) return;
+    unwrappedSamples.push({ ...sample, absoluteHour });
+  });
+  for (let index = 1; index < distinctSamples.length; index += 1) {
+    const previous = distinctSamples[index - 1],
+      current = distinctSamples[index],
+      expectedHour = previous.hour === 12 ? 1 : previous.hour + 1;
+    if (current.hour === expectedHour) sequentialGaps.push(current.sourceY - previous.sourceY);
+  }
+  for (let left = 0; left < unwrappedSamples.length; left += 1) {
+    for (let right = left + 1; right < unwrappedSamples.length; right += 1) {
+      const hourDelta = unwrappedSamples[right].absoluteHour
+          - unwrappedSamples[left].absoluteHour,
+        pixelDelta = unwrappedSamples[right].sourceY - unwrappedSamples[left].sourceY;
+      if (hourDelta > 0 && hourDelta <= 6 && pixelDelta > 0) {
+        pixelSlopes.push(pixelDelta / hourDelta);
+      }
+    }
+  }
+  const pixelsPerHour = sequentialGaps.length >= 2
+    ? median(sequentialGaps)
+    : pixelSlopes.length
+      ? median(pixelSlopes)
+      : null,
+    anchorSample = unwrappedSamples
+      .filter((sample) => sample.lineY != null)
+      .sort((left, right) => right.confidence - left.confidence)[0] || null;
+
+  console.log("OCR time-axis calibration", {
+    rawText: result?.data?.text || "",
+    samples,
+    distinctSamples,
+    unwrappedSamples,
+    sequentialGaps,
+    startHour,
+    pixelsPerHour,
+    anchorSample,
+  });
+  return startHour == null
+    ? null
+    : {
+        baseMinutes: startHour * 60,
+        slotOffset: 0,
+        calibrated: true,
+        samples,
+        pixelsPerHour,
+        anchorY: anchorSample?.lineY,
+        anchorMinutes: anchorSample?.absoluteHour * 60,
+      };
+};
+
 const makeRecognitionVariants = (canvas) => {
   const variants = [{ kind: "color", canvas }];
   const enlarged = createCanvas(canvas.width * 4, canvas.height * 4),
@@ -790,6 +1106,10 @@ const makeRecognitionVariants = (canvas) => {
   ectx.imageSmoothingEnabled = false;
   ectx.drawImage(canvas, 0, 0, enlarged.width, enlarged.height);
   variants.push({ kind: "scaled", canvas: enlarged });
+  variants.push({
+    kind: "background-difference",
+    canvas: makeBackgroundDifferenceCanvas(enlarged),
+  });
 
   const grayscale = createCanvas(enlarged.width, enlarged.height),
     gctx = getImageContext(grayscale);
@@ -810,9 +1130,10 @@ const makeRecognitionVariants = (canvas) => {
     tctx = getImageContext(threshold);
   tctx.drawImage(grayscale, 0, 0);
   const tData = tctx.getImageData(0, 0, threshold.width, threshold.height),
-    thresholdPixels = tData.data;
+    thresholdPixels = tData.data,
+    adaptiveThreshold = otsuThreshold(thresholdPixels);
   for (let i = 0; i < thresholdPixels.length; i += 4) {
-    const value = thresholdPixels[i] > 150 ? 255 : 0;
+    const value = thresholdPixels[i] > adaptiveThreshold ? 255 : 0;
     thresholdPixels[i] = value;
     thresholdPixels[i + 1] = value;
     thresholdPixels[i + 2] = value;
@@ -876,7 +1197,7 @@ const groupWordsIntoLines = (words) => {
 
 const classroomCandidateScore = (candidate) => {
   const text = normalizeClassroom(candidate.text || ""),
-    hasDigits = /\d{3,5}/.test(text),
+    hasDigits = /(?:[A-Za-z]\d{2,3}|\d{3,5})/.test(text),
     hasKorean = /[\uAC00-\uD7A3]/.test(text),
     hasLetters = /[A-Za-z]/.test(text),
     noisePenalty =
@@ -897,14 +1218,61 @@ const classroomCandidateScore = (candidate) => {
 
 const courseCandidateScore = (candidate) => {
   const text = normalizeCourseName([candidate]),
-    upper = text.toUpperCase();
+    upper = text.toUpperCase(),
+    koreanCount = (text.match(/[\uAC00-\uD7A3]/g) || []).length,
+    latinWords = text.match(/[A-Za-z]{3,}/g) || [],
+    longestCompactKoreanWord = Math.max(
+      0,
+      ...text.split(/\s+/).map((token) =>
+        /^[\uAC00-\uD7A3]+$/.test(token) ? token.length : 0,
+      ),
+    ),
+    scoreTextWithoutCourseSequence = text.replace(/\(\d{1,2}\)/g, ""),
+    digitCount = (scoreTextWithoutCourseSequence.match(/\d/g) || []).length,
+    numericTokens = (scoreTextWithoutCourseSequence.match(/(?:^|\s)\d+(?=\s|$)/g) || []).length,
+    mixedScriptNoise = koreanCount > 0 && latinWords.length > 0 && digitCount > 0,
+    trailingShortLatinNoise = koreanCount > 0 && /\s+[A-Za-z]{1,2}$/.test(text),
+    shortLatinOnly =
+      !koreanCount &&
+      text.split(/\s+/).filter(Boolean).every((token) => /^[A-Za-z|I]{1,2}$/.test(token));
   return (
     (upper.includes("COLLEGE") ? 2 : 0) +
     (upper.includes("ENGLISH") ? 2 : 0) +
     (/\bI\b/.test(upper) ? 1 : 0) -
     (/\d{3,}/.test(text) ? 3 : 0) -
-    (/^[0-9]/.test(text) ? 2 : 0)
+    digitCount * 1.1 -
+    numericTokens * 1.25 -
+    (mixedScriptNoise ? 3 : 0) -
+    (trailingShortLatinNoise ? 3 : 0) -
+    (/^[0-9]/.test(text) ? 2 : 0) +
+    Math.min(koreanCount, 12) * 0.7 +
+    (longestCompactKoreanWord >= 4 ? 1.4 : 0) +
+    Math.min(longestCompactKoreanWord, 12) * 0.06 +
+    Math.min(latinWords.join("").length, 24) * 0.12 +
+    Math.min(text.length, 36) * 0.035 -
+    (shortLatinOnly ? 4 : 0) -
+    (/[^\uAC00-\uD7A3A-Za-z0-9()\s.,+&/-]/.test(text) ? 2 : 0) -
+    (isLikelyClassroom(text) ? 6 : 0)
   );
+};
+
+const courseKeysSimilar = (left, right) => {
+  const leftCompact = left.replace(/\s+/g, ""),
+    rightCompact = right.replace(/\s+/g, "");
+  if (Math.min(leftCompact.length, rightCompact.length) >= 2) {
+    if (leftCompact.includes(rightCompact) || rightCompact.includes(leftCompact)) return true;
+  }
+  const meaningfulTokens = (value) =>
+      value
+        .split(/\s+/)
+        .map((token) => token.replace(/[^\uAC00-\uD7A3A-Z]/g, ""))
+        .filter((token) => token.length >= 3),
+    leftTokens = new Set(meaningfulTokens(left)),
+    rightTokens = new Set(meaningfulTokens(right)),
+    smallerSize = Math.min(leftTokens.size, rightTokens.size);
+  if (!smallerSize) return false;
+  const shared = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  return shared >= 1 && shared / smallerSize >= 0.6;
 };
 
 const hasVerticalRomanGlyphAfterEnglish = (rawWords = [], height = 1) =>
@@ -921,12 +1289,17 @@ const hasVerticalRomanGlyphAfterEnglish = (rawWords = [], height = 1) =>
 const buildCourseCandidateFromWords = (rawWords = [], height = 1) =>
   normalizeCourseName([
     rawWords
-      .filter((word) => {
+      .filter((word, wordIndex, words) => {
         const text = String(word.text || "").trim(),
-          relativeY = height ? word.y / height : 0;
+          relativeY = height ? word.y / height : 0,
+          nextText = String(words[wordIndex + 1]?.text || "").trim(),
+          isRoomPrefixBeforeNumber =
+            /^[\uAC00-\uD7A3A-Za-z]{1,3}$/.test(text) &&
+            /^(?:[A-Za-z]\d{2,3}|\d{3,4})$/.test(nextText);
         return (
           text &&
           relativeY < 0.72 &&
+          !isRoomPrefixBeforeNumber &&
           !isLikelyClassroom(text) &&
           !/^\d{3,5}$/.test(text)
         );
@@ -961,6 +1334,8 @@ const scorePrefixCandidate = (candidate) => {
     value = normalizeClassroom(rawText).replace(/\d+/g, "").trim();
   return (
     (/^[\uAC00-\uD7A3]{1,3}$/.test(value) ? 8 : 0) +
+    (/^[\uAC00-\uD7A3]$/.test(value) ? 2 : 0) -
+    (/^[\uAC00-\uD7A3]{2,3}$/.test(value) ? 0.75 : 0) +
     (/^[A-Za-z]$/.test(value) ? 0.5 : 0) -
     (/^[A-Za-z]{2,}$/.test(value) ? 8 : 0) -
     (/\d/.test(value) ? 4 : 0) -
@@ -984,38 +1359,54 @@ const pickPrefixCandidate = (candidates) =>
 
 const pickNumberCandidate = (candidates) =>
   candidates
-    .map((candidate) => String(candidate || "").replace(/\D/g, ""))
+    .map(
+      (candidate) =>
+        String(candidate || "").match(/([A-Za-z]\d{2,3}|\d{3,4})(?!.*[A-Za-z0-9])/)?.[1]
+        || "",
+    )
     .filter(Boolean)
-    .map((candidate) => candidate.slice(-3))
-    .find((candidate) => /^\d{3}$/.test(candidate)) || "";
+    .find((candidate) => /^(?:[A-Za-z]\d{2,3}|\d{3,4})$/.test(candidate)) || "";
 
 const restoreClassroomPrefix = (room, prefixCandidates, numberCandidates) => {
   const normalized = normalizeClassroom(room),
     prefix = pickPrefixCandidate(prefixCandidates),
     number = pickNumberCandidate([normalized, ...numberCandidates]);
-  if (!number) return { classroom: normalized, needsReview: !normalized };
-  if (/^[\uAC00-\uD7A3]{1,3}\d{3}$/.test(normalized))
+  if (!number) return { classroom: "", needsReview: true };
+  const directKoreanMatch = normalized.match(
+    /^([\uAC00-\uD7A3]{1,3})(?:[A-Za-z]\d{2,3}|\d{3,4})$/,
+  );
+  if (directKoreanMatch && directKoreanMatch[1].length === 1)
     return {
       classroom: normalized,
       needsReview: false,
-      classroomPrefixCandidate: normalized.replace(/\d{3}$/, ""),
+      classroomPrefixCandidate: normalized.replace(/(?:[A-Za-z]\d{2,3}|\d{3,4})$/, ""),
     };
-  if (/^[A-Za-z]{2,}\d{3}$/.test(normalized))
+  if (directKoreanMatch && /^[\uAC00-\uD7A3]$/.test(prefix.text))
     return {
-      classroom: number,
+      classroom: `${prefix.text}${number}`,
+      needsReview: false,
+      classroomPrefixCandidate: prefix.text,
+    };
+  if (directKoreanMatch)
+    return {
+      classroom: normalized,
+      needsReview: true,
+      classroomPrefixCandidate: directKoreanMatch[1],
+    };
+  if (/^[A-Za-z]+\d{2,4}$/.test(normalized))
+    return {
+      classroom: normalized,
       needsReview: true,
       classroomPrefixCandidate: "",
     };
+  if (/^(?:[A-Za-z]\d{2,3}|\d{3,4})$/.test(normalized))
+    return { classroom: normalized, needsReview: true, classroomPrefixCandidate: "" };
   if (/^[\uAC00-\uD7A3]{1,3}$/.test(prefix.text))
     return {
       classroom: `${prefix.text}${number}`,
       needsReview: false,
       classroomPrefixCandidate: prefix.text,
     };
-  if (/^\d{4}$/.test(normalized))
-    return { classroom: number, needsReview: true, classroomPrefixCandidate: "" };
-  if (/^\d{3}$/.test(normalized))
-    return { classroom: normalized, needsReview: true, classroomPrefixCandidate: "" };
   return {
     classroom: normalized,
     needsReview: !normalized || /^\d{3,4}$/.test(normalized),
@@ -1028,7 +1419,9 @@ const subjectNormalizationKey = (value) =>
 
 const classroomParts = (value) => {
   const normalized = normalizeClassroom(value),
-    match = normalized.match(/^([\uAC00-\uD7A3A-Za-z]{0,10})\s*(\d{3})$/);
+    match = normalized.match(
+      /^([\uAC00-\uD7A3A-Za-z]{0,10}?)\s*((?:[A-Za-z]\d{2,3})|(?:\d{3,4}))$/,
+    );
   if (match) {
     return {
       normalized,
@@ -1036,10 +1429,10 @@ const classroomParts = (value) => {
       number: match[2],
     };
   }
-  const trailingNumber = normalized.match(/(\d{3})$/);
+  const trailingNumber = normalized.match(/([A-Za-z]\d{2,3}|\d{3,4})$/);
   return {
     normalized,
-    prefix: normalized.replace(/\d+$/, "").trim(),
+    prefix: normalized.replace(/(?:[A-Za-z]\d{2,3}|\d{3,4})$/, "").trim(),
     number: trailingNumber?.[1] || "",
   };
 };
@@ -1048,9 +1441,11 @@ const scoreResolvedClassroom = (value) => {
   const { prefix, number, normalized } = classroomParts(value);
   return (
     (/^[\uAC00-\uD7A3]{1,3}$/.test(prefix) ? 8 : 0) +
+    (/^[\uAC00-\uD7A3]$/.test(prefix) ? 2 : 0) -
+    (/^[\uAC00-\uD7A3]{2,3}$/.test(prefix) ? 0.75 : 0) +
     (/^[A-Za-z]$/.test(prefix) ? 1 : 0) -
     (/^[A-Za-z]{2,}$/.test(prefix) ? 6 : 0) +
-    (/^\d{3}$/.test(number) ? 4 : 0) -
+    (/^(?:[A-Za-z]\d{2,3}|\d{3,4})$/.test(number) ? 4 : 0) -
     (!normalized ? 6 : 0)
   );
 };
@@ -1103,6 +1498,232 @@ const harmonizeClassroomsBySubject = (events) => {
     });
     return nextEvent;
   });
+};
+
+const resolveColorGroupClassroom = (groupedEvents) => {
+  const entries = groupedEvents.flatMap((event, eventIndex) => [
+      {
+        text: event.classroom,
+        eventIndex,
+        confidence: event._ocrRoomMeta?.roomConfidence ?? event.confidence ?? 0,
+        primary: true,
+      },
+      ...(event._ocrRoomMeta?.rawRoomCandidates || []).map((candidate) => ({
+        text: candidate.text,
+        eventIndex,
+        confidence: candidate.confidence ?? 0,
+        primary: false,
+      })),
+    ])
+    .map((entry) => ({ ...entry, room: classroomParts(entry.text) }))
+    .filter((entry) => entry.room.number),
+    threeDigitNumbers = new Set(
+      entries
+        .map((entry) => entry.room.number)
+        .filter((number) => /^\d{3}$/.test(number)),
+    ),
+    normalizedEntries = entries.map((entry) => {
+      const number = /^\d{4}$/.test(entry.room.number) &&
+          threeDigitNumbers.has(entry.room.number.slice(-3))
+        ? entry.room.number.slice(-3)
+        : entry.room.number;
+      return { ...entry, number };
+    }),
+    numberStats = new Map();
+  normalizedEntries.forEach((entry) => {
+    const current = numberStats.get(entry.number) || {
+      number: entry.number,
+      events: new Set(),
+      count: 0,
+      confidence: 0,
+      primaryCount: 0,
+    };
+    current.events.add(entry.eventIndex);
+    current.count += 1;
+    current.confidence += entry.confidence;
+    if (entry.primary) current.primaryCount += 1;
+    numberStats.set(entry.number, current);
+  });
+  const canonicalNumber = [...numberStats.values()].sort(
+    (left, right) =>
+      right.events.size * 10 + right.primaryCount * 3 + right.count + right.confidence
+      - (left.events.size * 10 + left.primaryCount * 3 + left.count + left.confidence),
+  )[0]?.number;
+  if (!canonicalNumber) return "";
+
+  const nearbyNumber = (candidate) => {
+      if (candidate === canonicalNumber) return true;
+      if (candidate.length !== canonicalNumber.length) return false;
+      let differences = 0;
+      for (let index = 0; index < candidate.length; index += 1) {
+        if (candidate[index] !== canonicalNumber[index]) differences += 1;
+      }
+      return differences <= 1;
+    },
+    prefixStats = new Map(),
+    knownCampusPrefixes = new Set(["공", "쉐", "영"]),
+    hasLatinA = normalizedEntries.some(
+      (entry) => entry.room.prefix.toUpperCase() === "A" && nearbyNumber(entry.number),
+    );
+  normalizedEntries
+    .filter((entry) => entry.room.prefix && nearbyNumber(entry.number))
+    .forEach((entry) => {
+      const prefix = entry.room.prefix,
+        current = prefixStats.get(prefix) || {
+          prefix,
+          events: new Set(),
+          confidence: 0,
+          exactCount: 0,
+          primaryCount: 0,
+        };
+      current.events.add(entry.eventIndex);
+      current.confidence += entry.confidence;
+      if (entry.number === canonicalNumber) current.exactCount += 1;
+      if (entry.primary) current.primaryCount += 1;
+      prefixStats.set(prefix, current);
+    });
+  const canonicalPrefix = [...prefixStats.values()].sort((left, right) => {
+    const score = (candidate) =>
+      candidate.events.size * 5 +
+      candidate.exactCount * 2 +
+      candidate.primaryCount +
+      candidate.confidence +
+      (knownCampusPrefixes.has(candidate.prefix) ? 6 : 0) +
+      (/^[A-Za-z]$/.test(candidate.prefix) ? 2 : 0) -
+      (candidate.prefix === "스" && hasLatinA ? 7 : 0);
+    return score(right) - score(left);
+  })[0]?.prefix;
+  return `${canonicalPrefix || ""}${canonicalNumber}`;
+};
+
+const harmonizeEventsByColor = (events) => {
+  const colorGroups = [];
+  events.forEach((event, index) => {
+    const rgb = parseHexColor(event.color);
+    const group = rgb
+      ? colorGroups.find((candidate) =>
+          areSimilarCourseColors(candidate.anchorColor, rgb),
+        )
+      : null;
+    if (group) group.indices.push(index);
+    else colorGroups.push({ anchorColor: rgb, indices: [index] });
+  });
+
+  const resolvedByIndex = new Map();
+  for (const group of colorGroups) {
+    const groupedEvents = group.indices.map((index) => events[index]),
+      subjectStats = [];
+    groupedEvents.forEach((event, eventIndex) => {
+      const candidates = [
+        event.courseName || event.subject || "",
+        ...(event._ocrCourseCandidates || []),
+      ],
+        eventCandidates = new Map();
+      candidates.forEach((candidate) => {
+        const subject = normalizeCourseName([candidate]),
+          key = subjectNormalizationKey(subject),
+          quality = courseCandidateScore(subject);
+        if (
+          !subject ||
+          !key ||
+          subject === "인식되지 않은 수업" ||
+          quality < -1
+        ) return;
+        const current = eventCandidates.get(key);
+        if (!current || quality > current.quality) {
+          eventCandidates.set(key, { subject, quality });
+        }
+      });
+      eventCandidates.forEach(({ subject, quality }, key) => {
+        const compactKey = key.replace(/\s+/g, ""),
+          current = subjectStats.find((stat) => {
+            return courseKeysSimilar(stat.key, key);
+          }) || {
+            subject,
+            key,
+            compactKey,
+            count: 0,
+            confidence: 0,
+            quality,
+            eventIndexes: new Set(),
+          },
+          isNewEvent = !current.eventIndexes.has(eventIndex),
+          currentRepresentativeScore =
+            current.quality + Math.min(current.subject.length, 36) * 0.12,
+          candidateRepresentativeScore =
+            quality + Math.min(subject.length, 36) * 0.12;
+        if (!subjectStats.includes(current)) subjectStats.push(current);
+        current.eventIndexes.add(eventIndex);
+        current.count = current.eventIndexes.size;
+        if (isNewEvent) current.confidence += event.confidence || 0;
+        if (candidateRepresentativeScore > currentRepresentativeScore) {
+          current.subject = subject;
+          current.key = key;
+          current.compactKey = compactKey;
+          current.quality = quality;
+        } else {
+          current.quality = Math.max(current.quality, quality);
+        }
+      });
+    });
+    let canonicalSubject = [...subjectStats].sort(
+      (left, right) =>
+        right.count * 6 + right.confidence * 2 + right.quality
+        - (left.count * 6 + left.confidence * 2 + left.quality),
+      )[0]?.subject;
+    const canonicalBase = canonicalSubject?.replace(/\(\d{1,2}\)$/, "").trim(),
+      sequencedCandidate = groupedEvents
+        .flatMap((event) => [
+          event.courseName || event.subject || "",
+          ...(event._ocrCourseCandidates || []),
+        ])
+        .map((candidate) => normalizeCourseName([candidate]))
+        .find(
+          (candidate) =>
+            /\(\d{1,2}\)$/.test(candidate) &&
+            candidate.replace(/\(\d{1,2}\)$/, "").trim() === canonicalBase,
+        );
+    if (sequencedCandidate) canonicalSubject = sequencedCandidate;
+    const canonicalRoom = resolveColorGroupClassroom(groupedEvents);
+
+    group.indices.forEach((index) => {
+      const event = events[index],
+        courseName = canonicalSubject || event.courseName,
+        classroom = canonicalRoom || event.classroom,
+        room = classroomParts(classroom);
+      resolvedByIndex.set(index, {
+        ...event,
+        courseName,
+        subject: courseName,
+        classroom,
+        needsReview:
+          !courseName ||
+          courseName === "인식되지 않은 수업" ||
+          !classroom ||
+          scoreResolvedClassroom(classroom) < 8,
+        _ocrRoomMeta: {
+          ...(event._ocrRoomMeta || {}),
+          finalPrefix: room.prefix,
+          harmonizationGroupKey: event.color || "",
+          wasHarmonized:
+            classroom !== event.classroom || courseName !== event.courseName,
+        },
+        _ocr: event._ocr
+          ? {
+              ...event._ocr,
+              courseName,
+              classroom,
+              needsReview:
+                !courseName ||
+                courseName === "인식되지 않은 수업" ||
+                !classroom ||
+                scoreResolvedClassroom(classroom) < 8,
+            }
+          : event._ocr,
+      });
+    });
+  }
+  return events.map((event, index) => resolvedByIndex.get(index) || event);
 };
 
 const pickClassroomEntry = (candidates) =>
@@ -1178,9 +1799,11 @@ const classifyBlockText = (
     classifiedLines = lines.map((line) => {
       const containsDigit = /\d/.test(line.text),
         classification =
-          line.relativeY > 0.55 &&
           containsDigit &&
-          (isLikelyClassroom(line.text) || line.text.length <= 10)
+          (isLikelyClassroom(line.text) ||
+            /^[\uAC00-\uD7A3A-Za-z]{0,3}\s*(?:[A-Za-z]\d{2,3}|\d{3,4})$/.test(
+              normalizeClassroom(line.text),
+            ))
             ? "classroom"
             : line.relativeY <= 0.72 &&
                 line.height >= maxHeight * 0.68 &&
@@ -1214,6 +1837,19 @@ const classifyBlockText = (
           )
           .join(" "),
       ),
+      ...variantResults.flatMap((result) => {
+        const plausibleLines = result.rawLines.filter(
+          (line) =>
+            line.length >= 2 &&
+            !isLikelyClassroom(line) &&
+            !/(?:[A-Za-z]\d{2,3}|\d{3,4})/.test(line),
+        );
+        return plausibleLines.flatMap((line, index) => [
+          line,
+          plausibleLines.slice(index, index + 2).join(" "),
+          plausibleLines.slice(index, index + 3).join(" "),
+        ]);
+      }),
     ],
     classroomCandidates = [
       ...classifiedLines
@@ -1236,6 +1872,18 @@ const classifyBlockText = (
           source: `room-line-${result.kind}`,
         })),
       ),
+      ...variantResults.flatMap((result) =>
+        result.rawLines
+          .filter((line) => /(?:[A-Za-z]\d{2,3}|\d{3,4})/.test(line))
+          .map((line) => ({
+            text: line,
+            confidence: result.confidence,
+            y: result.height * 0.72,
+            height: 0,
+            relativeY: 0.72,
+            source: `block-raw-${result.kind}`,
+          })),
+      ),
     ],
     courseName =
       pickCourseCandidate(
@@ -1246,7 +1894,7 @@ const classifyBlockText = (
               .slice(0, 2),
       ) || "인식되지 않은 수업",
     classroomEntry = pickClassroomEntry(classroomCandidates),
-    classroomCandidate = "",
+    classroomCandidate = classroomEntry?.text || "",
     hasVerticalGlyphAfterEnglish = variantResults.some((result) =>
       hasVerticalRomanGlyphAfterEnglish(result.rawWords || [], result.height),
     ),
@@ -1276,11 +1924,14 @@ const classifyBlockText = (
         ),
       })),
     ),
-    restoredClassroom = {
-      classroom: "",
-      needsReview: true,
-      classroomPrefixCandidate: "",
-    },
+    restoredClassroom = restoreClassroomPrefix(
+      classroomCandidate,
+      prefixCandidatesDetailed,
+      [
+        ...roomVariantResults.flatMap((result) => result.rawLines),
+        ...numberVariantResults.flatMap((result) => result.rawLines),
+      ],
+    ),
     rawRoomCandidates = [
       ...classroomCandidates.map((candidate) => ({
         text: candidate.text,
@@ -1358,6 +2009,7 @@ const classifyBlockText = (
     rawRoomCandidates,
     prefixCandidates: prefixCandidatesDetailed,
     rawText: mergedRaw,
+    courseCandidates: courseVariantCandidates,
   };
 };
 
@@ -1366,7 +2018,7 @@ const analyzeBlock = async (worker, sourceCanvas, block) => {
     roomBlock = {
       x0: block.x0,
       x1: block.x1,
-      y0: Math.round(block.y0 + (block.y1 - block.y0 + 1) * 0.55),
+      y0: Math.round(block.y0 + (block.y1 - block.y0 + 1) * 0.3),
       y1: block.y1,
     },
     roomCanvas = cropCanvas(sourceCanvas, roomBlock, 1),
@@ -1409,6 +2061,57 @@ const analyzeBlock = async (worker, sourceCanvas, block) => {
         result?.data?.confidence != null ? result.data.confidence / 100 : 0,
       height: variant.canvas.height,
     });
+  }
+  const initialCourseScore = Math.max(
+    -10,
+    ...variantResults.flatMap((result) =>
+      result.rawLines
+        .filter((line) => !isLikelyClassroom(line))
+        .map((line) => courseCandidateScore(line)),
+    ),
+  );
+  if (initialCourseScore < 1.5) {
+    const fullBlockCanvas = cropCanvas(sourceCanvas, block),
+      courseTopCanvas = cropCanvasRelative(
+        fullBlockCanvas,
+        { x0: 0, y0: 0, x1: fullBlockCanvas.width - 1, y1: fullBlockCanvas.height - 1 },
+        0,
+        0,
+        1,
+        0.68,
+        0,
+      ),
+      courseTopVariants = makeRecognitionVariants(courseTopCanvas).filter(
+        (variant) => ["scaled", "background-difference"].includes(variant.kind),
+      );
+    await worker.setParameters({
+      preserve_interword_spaces: "1",
+      tessedit_pageseg_mode: "6",
+    });
+    for (const variant of courseTopVariants) {
+      const result = await worker.recognize(variant.canvas, {}, { text: true, blocks: true }),
+        words = wordsOf(result?.data),
+        lines = groupWordsIntoLines(words);
+      variantResults.push({
+        kind: `course-top-${variant.kind}`,
+        rawWords: words.map((word) => ({
+          text: wordText(word),
+          x: word.bbox?.x0 || 0,
+          y: word.bbox?.y0 || 0,
+          width: (word.bbox?.x1 || 0) - (word.bbox?.x0 || 0),
+          height: (word.bbox?.y1 || 0) - (word.bbox?.y0 || 0),
+          confidence: word.confidence != null ? word.confidence / 100 : 0.5,
+        })),
+        text: cleanOcrText(result?.data?.text || ""),
+        rawLines: cleanOcrText(result?.data?.text || "")
+          .split(/\r?\n/)
+          .map(removeRepeatedWords)
+          .filter(Boolean),
+        lines,
+        confidence: result?.data?.confidence != null ? result.data.confidence / 100 : 0,
+        height: variant.canvas.height,
+      });
+    }
   }
   await worker.setParameters({
     preserve_interword_spaces: "1",
@@ -1523,24 +2226,32 @@ const createEvent = (block, textInfo, grid, baseTime, pixels, w, index) => {
     startSlotIndex = startSlot.slotIndex,
     endSlotIndex = endSlot.slotIndex,
     pixelsPer15MinuteSlot =
-      (grid.medianGap || grid.rowHeight || 60) / 4,
+      (baseTime?.pixelsPerHour || grid.rowHeight || grid.medianGap || 60) / 4,
     rawDurationSlots = Math.round((block.y1 - block.y0 + 1) / pixelsPer15MinuteSlot),
-    normalizedDurationSlots =
-      Math.abs(rawDurationSlots - 5) <= 1 ? 5 : clamp(rawDurationSlots, 3, 8),
+    normalizedDurationSlots = durationSlotsFromPixels(
+      block.y1 - block.y0 + 1,
+      pixelsPer15MinuteSlot,
+    ),
     rawRelativeY = block.y0 - grid.firstTimeRowTop,
     rawSlotIndex = rawRelativeY / pixelsPer15MinuteSlot,
     slotOffset = baseTime?.slotOffset ?? 0,
     finalSlotIndex = Math.round(rawSlotIndex),
     correctedSlotIndex = finalSlotIndex + slotOffset,
     baseStartMinutes = baseTime?.baseMinutes ?? timetableStartHour * 60,
-    resultMinutes = baseStartMinutes + correctedSlotIndex * quarterHour,
-    snappedStartMinutes = canonicalClassStartMinutes.reduce((best, candidate) =>
-      Math.abs(candidate - resultMinutes) < Math.abs(best - resultMinutes)
-        ? candidate
-        : best,
-    canonicalClassStartMinutes[0]);
-  let endMinutes = snappedStartMinutes + normalizedDurationSlots * quarterHour;
-  const startTime = formatMinutes(quantizeMinutes(snappedStartMinutes)),
+    resultMinutes =
+      baseTime?.calibrated && baseTime?.anchorY != null && baseTime?.anchorMinutes != null
+        ? baseTime.anchorMinutes
+          + ((block.y0 - baseTime.anchorY) / Math.max(baseTime.pixelsPerHour, 1)) * 60
+        : baseStartMinutes + correctedSlotIndex * quarterHour,
+    mappedStartMinutes = baseTime?.calibrated
+      ? quantizeMinutes(resultMinutes)
+      : canonicalClassStartMinutes.reduce((best, candidate) =>
+          Math.abs(candidate - resultMinutes) < Math.abs(best - resultMinutes)
+            ? candidate
+            : best,
+        canonicalClassStartMinutes[0]);
+  let endMinutes = mappedStartMinutes + normalizedDurationSlots * quarterHour;
+  const startTime = formatMinutes(quantizeMinutes(mappedStartMinutes)),
     endTime = formatMinutes(quantizeMinutes(endMinutes)),
     relativeTop =
       (block.y0 - grid.firstTimeRowTop) /
@@ -1570,6 +2281,7 @@ const createEvent = (block, textInfo, grid, baseTime, pixels, w, index) => {
         textInfo.confidence < 0.5,
       boundingBox,
       rawText: textInfo.rawText || [],
+      _ocrCourseCandidates: textInfo.courseCandidates || [],
       subject: textInfo.subject,
       weekday: columnIndex,
       start_time: startTime,
@@ -1650,8 +2362,10 @@ const createEvent = (block, textInfo, grid, baseTime, pixels, w, index) => {
     startTime,
     endTime,
     durationMinutes: minutes(endTime) - minutes(startTime),
-    expectedDurationMinutes: 75,
-    isDurationValid: minutes(endTime) - minutes(startTime) === 75,
+    expectedDurationMinutes: normalizedDurationSlots * quarterHour,
+    isDurationValid:
+      minutes(endTime) - minutes(startTime) ===
+      normalizedDurationSlots * quarterHour,
   });
   console.log("Final event validation", {
     blockIndex: index,
@@ -1677,7 +2391,7 @@ const detectBlockShells = async (file) => {
     pixels = ctx.getImageData(0, 0, w, h).data,
     { background, mask } = buildForegroundMask(pixels, w, h),
     grid = detectGrid(pixels, w, h),
-    rawBlocks = mergeNearbyBlocks(connectedComponents(mask, w, h), pixels, w, h)
+    componentBlocks = mergeNearbyBlocks(connectedComponents(mask, w, h), pixels, w, h)
       .filter(
         (block) =>
           block.x1 >= grid.scheduleGridBounds.x &&
@@ -1685,8 +2399,12 @@ const detectBlockShells = async (file) => {
           block.y1 >= grid.scheduleGridBounds.y &&
           block.y0 <= grid.scheduleGridBounds.y + grid.scheduleGridBounds.height,
       ),
+    columnRunBlocks = detectColoredColumnRuns(pixels, w, h, grid, background),
+    detectionMode = columnRunBlocks.length ? "column-color-runs" : "connected-components",
+    rawBlocks = columnRunBlocks.length ? columnRunBlocks : componentBlocks,
     blocks = rawBlocks
       .flatMap((block) =>
+        detectionMode === "connected-components" &&
         block.x1 - block.x0 + 1 > grid.columnWidth * 1.4
           ? splitWideComponentByColumns(block, grid, mask, w)
           : [block],
@@ -1694,7 +2412,7 @@ const detectBlockShells = async (file) => {
       .filter(
         (block) =>
           block.x1 - block.x0 + 1 > grid.columnWidth * 0.55 &&
-          block.y1 - block.y0 + 1 > grid.rowHeight * 0.45,
+          block.y1 - block.y0 + 1 > grid.rowHeight * 0.32,
       )
       .map((block) => ({
         ...block,
@@ -1703,6 +2421,9 @@ const detectBlockShells = async (file) => {
       .sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0),
     baseTime = inferBaseStartMinutes(grid, blocks);
   console.log("Detected timetable blocks", {
+    detectionMode,
+    componentCount: componentBlocks.length,
+    columnRunCount: columnRunBlocks.length,
     count: blocks.length,
     blocks: blocks.map((block, index) => ({
       index,
@@ -1732,7 +2453,7 @@ export async function recognizeTimetable(file, onProgress) {
   const worker = await createWorker("kor+eng", 1, {
     logger: (event) =>
       event.status === "recognizing text" &&
-      onProgress(Math.round((event.progress || 0) * 100)),
+      onProgress?.(Math.round((event.progress || 0) * 100)),
   });
   try {
     await worker.setParameters({
@@ -1740,8 +2461,19 @@ export async function recognizeTimetable(file, onProgress) {
       tessedit_pageseg_mode: "6",
     });
     const shells = await detectBlockShells(file),
+      calibratedBaseTime = await calibrateTimeAxis(
+        worker,
+        shells.sourceCanvas,
+        shells.grid,
+      ),
       generatedEvents = [],
       recognizedBlocks = [];
+    if (calibratedBaseTime) shells.baseTime = calibratedBaseTime;
+    await worker.setParameters({
+      preserve_interword_spaces: "1",
+      tessedit_char_whitelist: "",
+      tessedit_pageseg_mode: "6",
+    });
     for (let index = 0; index < shells.blocks.length; index += 1) {
       const block = shells.blocks[index],
         analysis = await analyzeBlock(worker, shells.sourceCanvas, block),
@@ -1791,27 +2523,9 @@ export async function recognizeTimetable(file, onProgress) {
       text = fallback?.data?.text || "";
       generatedEvents.push(...parseEverytimeText(text));
     }
-    const finalEvents = generatedEvents.map((event) => ({
-      ...event,
-      classroom: "",
-      needsReview: true,
-      _ocrRoomMeta: {
-        ...(event._ocrRoomMeta || {}),
-        originalClassroom: "",
-        finalPrefix: "",
-        prefixSource: "",
-        prefixConfidence: 0,
-        isDerived: false,
-        harmonizationGroupKey: "",
-      },
-      _ocr: event._ocr
-        ? {
-            ...event._ocr,
-            classroom: "",
-            needsReview: true,
-          }
-        : event._ocr,
-    }));
+    const finalEvents = harmonizeClassroomsBySubject(
+      harmonizeEventsByColor(generatedEvents),
+    );
     finalEvents.forEach((event) => {
       console.log("Final event validation", {
         blockId: event.id,
@@ -1820,16 +2534,19 @@ export async function recognizeTimetable(file, onProgress) {
         endTime: event.endTime,
         durationMinutes: minutes(event.endTime) - minutes(event.startTime),
         courseName: event.courseName,
-        originalClassroom: "",
-        finalClassroom: "",
-        roomNumber: "",
-        originalPrefix: "",
-        finalPrefix: "",
-        prefixSource: "",
-        prefixConfidence: 0,
-        wasHarmonized: false,
-        harmonizationGroupKey: "",
-        needsReview: true,
+        originalClassroom: event._ocrRoomMeta?.originalClassroom || "",
+        finalClassroom: event.classroom || "",
+        roomNumber: classroomParts(event.classroom).number,
+        originalPrefix: classroomParts(
+          event._ocrRoomMeta?.originalClassroom,
+        ).prefix,
+        finalPrefix: classroomParts(event.classroom).prefix,
+        prefixSource: event._ocrRoomMeta?.prefixSource || "",
+        prefixConfidence: event._ocrRoomMeta?.prefixConfidence || 0,
+        wasHarmonized: event._ocrRoomMeta?.wasHarmonized || false,
+        harmonizationGroupKey:
+          event._ocrRoomMeta?.harmonizationGroupKey || "",
+        needsReview: event.needsReview,
       });
     });
     console.log("OCR timetable debug", {

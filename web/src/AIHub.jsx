@@ -14,12 +14,15 @@ import {
 import { supabase } from "./supabase";
 import { loadUserState, readLocalState, saveUserStateLater, writeLocalState } from "./appState";
 import { loadRecommendedSchedule, saveRecommendedSchedule } from "./aiScheduleStore";
+import { getAcademicCalendar } from "./academicApi";
 import { academicFallback2026 } from "./academicData";
+import { selectTimetableRowsForDate } from "./activeTimetable";
+import { isPersonalScheduleHeavy, postCommuteStudyStart } from "./aiStudyPolicy";
 import { api } from "./api";
 import "./ai-hub.css";
 
 const dayNames = ["월", "화", "수", "목", "금", "토", "일"];
-const AI_SCHEDULE_VERSION = 3;
+const AI_SCHEDULE_VERSION = 4;
 const toMinutes = (time) => {
   const [hour, minute] = String(time).slice(0, 5).split(":").map(Number);
   return hour * 60 + minute;
@@ -91,37 +94,53 @@ function studyTargetsForDate(items, targetDate) {
 
 function useSchedulerData() {
   const [rows, setRows] = useState([]);
+  const [collections, setCollections] = useState([]);
+  const [academicSchedules, setAcademicSchedules] = useState(academicFallback2026);
+  const [preferredTimetableId, setPreferredTimetableId] = useState(null);
   const [profile, setProfile] = useState(null);
   const [personalSchedules, setPersonalSchedules] = useState(() => {
     const stored = readStore("kmu-personal-schedules");
     return Array.isArray(stored) ? stored : [];
   });
   useEffect(() => {
-    Promise.all([
-      supabase.from("timetables").select("*").order("weekday").order("start_time"),
-      supabase.from("profiles").select("*").single(),
-      supabase.from("personal_schedules").select("*").order("schedule_date").order("start_time"),
-    ]).then(([courses, user, schedules]) => {
+    let active = true;
+    async function load() {
+      const { data: authData, error: authError } = await supabase.auth.getUser();
+      if (authError || !authData.user) return;
+      const [savedTimetableId, calendarResult, courses, timetableCollections, user, schedules] = await Promise.all([
+        loadUserState("kmu-active-timetable-id", null),
+        getAcademicCalendar().then((calendar) => ({ calendar })).catch((error) => ({ error })),
+        supabase.from("timetables").select("*").eq("user_id", authData.user.id).order("weekday").order("start_time"),
+        supabase.from("timetable_collections").select("id,year,semester,title,updated_at").eq("user_id", authData.user.id),
+        supabase.from("profiles").select("*").eq("id", authData.user.id).maybeSingle(),
+        supabase.from("personal_schedules").select("*").eq("user_id", authData.user.id).order("schedule_date").order("start_time"),
+      ]);
+      if (!active) return;
       setRows(courses.data || []);
+      setCollections(timetableCollections.data || []);
+      setAcademicSchedules(calendarResult.calendar?.schedules?.length ? calendarResult.calendar.schedules : academicFallback2026);
+      setPreferredTimetableId(Number(savedTimetableId) || null);
       setProfile(user.data || null);
       if (!schedules.error && Array.isArray(schedules.data)) {
         writeLocalState("kmu-personal-schedules", schedules.data);
         setPersonalSchedules(schedules.data);
       }
-    });
+    }
+    load();
+    return () => { active = false; };
   }, []);
-  return { rows, profile, personalSchedules };
+  return { rows, collections, academicSchedules, preferredTimetableId, profile, personalSchedules };
 }
 
-function appliedDay(date) {
-  const event = academicFallback2026.find(
+function appliedDay(date, academicSchedules = academicFallback2026) {
+  const event = academicSchedules.find(
     (item) => item.start_date <= date && item.end_date >= date && item.event_type === "makeup",
   );
   return event?.applied_weekday ?? weekday(date);
 }
-function classesFor(rows, date) {
+function classesFor(rows, date, academicSchedules = academicFallback2026) {
   return rows
-    .filter((row) => row.weekday === appliedDay(date))
+    .filter((row) => Number(row.weekday) === appliedDay(date, academicSchedules))
     .map((row) => ({
       start: toMinutes(row.start_time), end: toMinutes(row.end_time),
       title: row.subject, subtitle: row.classroom || "강의실 미정", type: "class",
@@ -265,7 +284,7 @@ function mergeFixedConflicts(items) {
   });
 }
 
-function cleanPlanForDisplay(items) {
+function cleanPlanForDisplay(items, constraints = {}) {
   const fixed = items.filter((item) => fixedScheduleTypes.has(item.type))
     .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start);
   const accepted = [];
@@ -275,6 +294,7 @@ function cleanPlanForDisplay(items) {
     .sort((a, b) => a.start - b.start)
     .forEach((item) => {
       if (!Number.isFinite(item.start) || !Number.isFinite(item.end) || item.end <= item.start) return;
+      if (item.type === "study" && (constraints.skipStudy || item.start < Number(constraints.studyEarliest || 0))) return;
       const title = normalizedScheduleTitle(item.title);
       if (!title || titles.has(title) || repeatsFixedSchedule(item, fixed)) return;
       if (withTransitionBuffer(occupied).some((block) => schedulesOverlap(item, block))) return;
@@ -292,7 +312,7 @@ function planSignature(items) {
     .join("\n");
 }
 
-function sanitizeAiPlan(aiItems, protectedItems, preferences, date) {
+function sanitizeAiPlan(aiItems, protectedItems, preferences, date, constraints = {}) {
   const dayStart = toMinutes(preferences.availableStart || "07:00");
   const dayEnd = toMinutes(preferences.availableEnd || "22:00");
   const fixed = protectedItems.map((item) => ({ ...item, planDate: date }));
@@ -303,16 +323,20 @@ function sanitizeAiPlan(aiItems, protectedItems, preferences, date) {
   aiItems.filter((item) => flexibleScheduleTypes.has(item.type))
     .sort((a, b) => a.start - b.start)
     .forEach((item) => {
+      if (item.type === "study" && constraints.skipStudy) return;
       const title = normalizedScheduleTitle(item.title);
       if (!title || titles.has(title) || repeatsFixedSchedule(item, fixed)) return;
       const duration = Math.max(15, Math.min(180, item.end - item.start));
       if (!Number.isFinite(duration)) return;
       let candidate = { ...item, end: item.start + duration, planDate: date, scheduleVersion: AI_SCHEDULE_VERSION };
+      const earliest = item.type === "study"
+        ? Math.max(dayStart, Number(constraints.studyEarliest || dayStart))
+        : dayStart;
       const buffered = withTransitionBuffer(occupied);
-      const fits = candidate.start >= dayStart && candidate.end <= dayEnd
+      const fits = candidate.start >= earliest && candidate.end <= dayEnd
         && !buffered.some((block) => schedulesOverlap(candidate, block));
       if (!fits) {
-        const slots = freeSlots(buffered, dayStart, dayEnd)
+        const slots = freeSlots(buffered, earliest, dayEnd)
           .filter((slot) => slot.end - slot.start >= duration);
         const slot = slots.find((value) => value.start >= Math.max(dayStart, candidate.start)) || slots[0];
         if (!slot) return;
@@ -326,14 +350,18 @@ function sanitizeAiPlan(aiItems, protectedItems, preferences, date) {
   return [...fixed, ...accepted].sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
-function scheduleContext({ date, classes, personal, commute, studyTargets, tasks, preferences, draftPlan }) {
+function scheduleContext({ date, classes, personal, commute, studyTargets, tasks, preferences, draftPlan, academicSchedules, studyEarliest, personalBusy }) {
   const fixedBlocks = [...classes, ...personal, ...commute].map((item) => ({
     start: toTime(item.start), end: toTime(item.end), title: item.title, type: item.type,
   }));
   return {
     date,
-    weekday: dayNames[appliedDay(date)],
+    weekday: dayNames[appliedDay(date, academicSchedules)],
     preferences,
+    study_policy: {
+      earliest_start: toTime(studyEarliest),
+      skip_on_personal_schedule_heavy_day: personalBusy,
+    },
     fixed_blocks: fixedBlocks,
     study_targets: studyTargets.map((item) => ({ subject: item.subject, section: item.section, deadline: item.date })),
     tasks: tasks.filter((item) => !item.done).map((item) => ({ title: item.title, duration_minutes: Number(item.duration), priority: item.priority, deadline: item.deadline })),
@@ -344,7 +372,7 @@ function scheduleContext({ date, classes, personal, commute, studyTargets, tasks
 }
 
 export function AISchedulePage() {
-  const { rows, personalSchedules } = useSchedulerData();
+  const { rows, collections, academicSchedules, preferredTimetableId, personalSchedules } = useSchedulerData();
   const today = dateKey(new Date());
   const [date, setDate] = useState(today);
   const [tasks, setTasks] = useState(() => {
@@ -356,7 +384,7 @@ export function AISchedulePage() {
     return Array.isArray(stored) ? stored : [];
   });
   const scheduleNeedsRefresh = storedSchedule.some(
-    (item) => item.type === "task" && item.scheduleVersion !== AI_SCHEDULE_VERSION,
+    (item) => flexibleScheduleTypes.has(item.type) && item.scheduleVersion !== AI_SCHEDULE_VERSION,
   );
   const [plan, setPlan] = useState(() => scheduleNeedsRefresh ? [] : storedSchedule);
   const [form, setForm] = useState({ title: "", duration: 60, priority: "보통", deadline: today });
@@ -367,7 +395,7 @@ export function AISchedulePage() {
   const [aiBusy, setAiBusy] = useState(false);
   const [stateReady, setStateReady] = useState(false);
   const [message, setMessage] = useState(() => scheduleNeedsRefresh
-    ? "이전 방식으로 만든 일정은 전환 시간이 실제 시각에 반영되지 않아 초기화했습니다. AI 일정 만들기를 다시 눌러주세요."
+    ? "이전 추천 일정은 현재 학기와 하교 이후 학습 규칙을 반영하기 위해 초기화했습니다. AI 일정 만들기를 다시 눌러주세요."
     : "");
   useEffect(() => {
     let active = true;
@@ -380,7 +408,7 @@ export function AISchedulePage() {
       if (!active) return;
       if (Array.isArray(nextTasks)) setTasks(nextTasks);
       if (Array.isArray(nextSchedule)) {
-        const stale = nextSchedule.some((item) => item.type === "task" && item.scheduleVersion !== AI_SCHEDULE_VERSION);
+        const stale = nextSchedule.some((item) => flexibleScheduleTypes.has(item.type) && item.scheduleVersion !== AI_SCHEDULE_VERSION);
         setPlan(stale ? [] : nextSchedule);
         if (stale) writeStore("kmu-ai-schedule", []);
       }
@@ -396,7 +424,9 @@ export function AISchedulePage() {
     let active = true;
     loadRecommendedSchedule(date).then((savedSchedule) => {
       if (!active || !Array.isArray(savedSchedule?.items)) return;
-      const cloudItems = savedSchedule.items.map((item) => ({ ...item, planDate: item.planDate || date }));
+      const cloudItems = savedSchedule.items
+        .map((item) => ({ ...item, planDate: item.planDate || date }))
+        .filter((item) => !flexibleScheduleTypes.has(item.type) || item.scheduleVersion === AI_SCHEDULE_VERSION);
       setPlan((current) => {
         const next = [
           ...current.filter((item) => item.planDate && item.planDate !== date),
@@ -408,7 +438,14 @@ export function AISchedulePage() {
     });
     return () => { active = false; };
   }, [date, stateReady]);
-  const classes = useMemo(() => classesFor(rows, date), [rows, date]);
+  const timetableView = useMemo(
+    () => selectTimetableRowsForDate(rows, collections, academicSchedules, new Date(`${date}T12:00:00`), preferredTimetableId),
+    [academicSchedules, collections, date, preferredTimetableId, rows],
+  );
+  const classes = useMemo(
+    () => classesFor(timetableView.rows, date, academicSchedules),
+    [academicSchedules, date, timetableView.rows],
+  );
   const personalForDate = useMemo(
     () => personalSchedulesForDate(personalSchedules, date),
     [personalSchedules, date],
@@ -418,6 +455,14 @@ export function AISchedulePage() {
     // 따라서 하교 이동은 마지막 수업 종료 시각에 바로 시작한다.
     () => commuteBlocks(classes, preferences),
     [classes, preferences],
+  );
+  const studyEarliest = useMemo(
+    () => postCommuteStudyStart(classes, preferences.fromCampusMinutes),
+    [classes, preferences.fromCampusMinutes],
+  );
+  const personalBusy = useMemo(
+    () => isPersonalScheduleHeavy(personalForDate, studyEarliest, toMinutes(preferences.availableEnd || "22:00")),
+    [personalForDate, preferences.availableEnd, studyEarliest],
   );
   const studyTargets = useMemo(
     () => studyTargetsForDate(readStore("kmu-study-plan"), date),
@@ -429,8 +474,8 @@ export function AISchedulePage() {
       ...personalForDate.map((item) => ({ ...item, planDate: date })),
       ...commuteForDate.map((item) => ({ ...item, planDate: date })),
       ...plan.filter((item) => (!item.planDate || item.planDate === date) && !fixedScheduleTypes.has(item.type)),
-    ]),
-    [classes, commuteForDate, date, personalForDate, plan],
+    ], { studyEarliest, skipStudy: personalBusy }),
+    [classes, commuteForDate, date, personalBusy, personalForDate, plan, studyEarliest],
   );
   useEffect(() => {
     if (!stateReady) return;
@@ -518,15 +563,26 @@ export function AISchedulePage() {
       occupied.push(lunch);
     }
     let scheduledCount = 0;
+    let deferredStudyCount = 0;
     for (const task of queue) {
       const duration = Math.max(15, Number(task.duration) || 60);
+      const isStudy = task.source === "study";
+      if (isStudy && personalBusy) {
+        deferredStudyCount += 1;
+        continue;
+      }
+      const slotStart = isStudy
+        ? Math.max(toMinutes(preferences.availableStart || "07:00"), studyEarliest)
+        : toMinutes(preferences.availableStart || "07:00");
       const slot = freeSlots(
         withTransitionBuffer(occupied),
-        toMinutes(preferences.availableStart || "07:00"),
+        slotStart,
         toMinutes(preferences.availableEnd || "22:00"),
       ).find((item) => item.end - item.start >= duration);
-      if (!slot) continue;
-      const isStudy = task.source === "study";
+      if (!slot) {
+        if (isStudy) deferredStudyCount += 1;
+        continue;
+      }
       const item = {
         start: slot.start,
         end: slot.start + duration,
@@ -549,14 +605,18 @@ export function AISchedulePage() {
     const lunchNote = lunchSlot ? "" : " 12:00~14:00에 40분 이상 빈 시간이 없어 점심은 자동 배치하지 못했습니다.";
     const fixedNote = personalForDate.length ? ` 개인 일정 ${personalForDate.length}건을 고정 시간으로 반영했습니다.` : "";
     const studyNote = studyQueue.length ? ` 공부 목표 ${studyQueue.length}건을 함께 검토했습니다.` : "";
+    const deferredStudyNote = deferredStudyCount
+      ? ` 공부 목표 ${deferredStudyCount}건은 하교 이후 여유 시간이 부족하거나 개인 일정이 많아 다음 가능한 날로 미뤘습니다.`
+      : "";
     const fallbackMessage = !queue.length
       ? `완료되지 않은 할 일이나 가까운 공부 목표가 없어 수업·개인 일정·이동·휴식만 반영했습니다.${fixedNote}${lunchNote}`
       : !scheduledCount
-        ? `입력한 소요 시간을 넣을 빈 시간이 없습니다. 시간이나 날짜를 조정해주세요.${lunchNote}`
-        : `${queue.length}개 중 ${scheduledCount}개의 할 일과 공부 목표를 추천 일정에 배치했습니다.${fixedNote}${studyNote}${lunchNote}${saved ? "" : " (브라우저 저장 실패)"}`;
+        ? `입력한 소요 시간을 넣을 충분한 여유가 없습니다. 시간이나 날짜를 조정해주세요.${deferredStudyNote}${lunchNote}`
+        : `${queue.length}개 중 ${scheduledCount}개의 할 일과 공부 목표를 추천 일정에 배치했습니다.${fixedNote}${studyNote}${deferredStudyNote}${lunchNote}${saved ? "" : " (브라우저 저장 실패)"}`;
     const context = scheduleContext({
       date, classes, personal: personalForDate, commute: commuteForDate,
       studyTargets: currentStudyTargets, tasks, preferences, draftPlan: next,
+      academicSchedules, studyEarliest, personalBusy,
     });
     const cloudSaved = await saveRecommendedSchedule({
       planDate: date,
@@ -586,6 +646,7 @@ export function AISchedulePage() {
           protectedItems,
           preferences,
           date,
+          { studyEarliest, skipStudy: personalBusy },
         );
         setPlan(refined);
         saved = writeStore("kmu-ai-schedule", refined);
@@ -632,7 +693,7 @@ export function AISchedulePage() {
         <div className="task-list">{tasks.map((task) => <article key={task.id} className={task.done ? "done" : ""}><button onClick={() => saveTasks(tasks.map((item) => item.id === task.id ? { ...item, done: !item.done } : item))}><Check /></button><div><b>{task.title}</b><small>예상 {task.duration}분 · {task.deadline} 마감 · 우선순위 {task.priority}</small></div><button onClick={() => saveTasks(tasks.filter((item) => item.id !== task.id))}><Trash2 /></button></article>)}</div>
         <button type="button" className="ai-primary" onClick={generate} disabled={aiBusy}><Sparkles />{aiBusy ? "AI가 일정 검토 중..." : "AI 일정 만들기"}</button>
       </section>
-      <section className="ai-panel ai-result"><header><div><h2>{date} 추천 일정</h2><p>{dayNames[appliedDay(date)]}요일 · 수업 {classes.length}개 · 개인 일정 {personalForDate.length}개 · 이동 {commuteForDate.length}개 · 가까운 공부 목표 {studyTargets.length}개</p></div></header>
+      <section className="ai-panel ai-result"><header><div><h2>{date} 추천 일정</h2><p>{timetableView.term.year}년 {timetableView.term.label} · {dayNames[appliedDay(date, academicSchedules)]}요일 · 수업 {classes.length}개 · 개인 일정 {personalForDate.length}개 · 이동 {commuteForDate.length}개 · 가까운 공부 목표 {studyTargets.length}개</p></div></header>
         {visiblePlan.length ? <div className="timeline">{visiblePlan.map((item, index) => <article className={item.type} key={`${item.start}-${index}`}><time>{toTime(item.start)}<span>{toTime(item.end)}</span></time><i></i><div><b>{item.title}</b><small>{cleanScheduleSubtitle(item.subtitle)}</small></div></article>)}</div> : <Empty text="할 일·개인 일정·공부 계획을 확인한 뒤 AI 일정 만들기를 눌러주세요." />}
       </section>
     </div>
@@ -640,8 +701,16 @@ export function AISchedulePage() {
 }
 
 export function StudyPlannerPage() {
-  const { rows } = useSchedulerData();
-  const subjects = [...new Set(rows.map((row) => row.subject).filter(Boolean))];
+  const { rows, collections, academicSchedules, preferredTimetableId, personalSchedules } = useSchedulerData();
+  const currentTimetableView = useMemo(
+    () => selectTimetableRowsForDate(rows, collections, academicSchedules, new Date(), preferredTimetableId),
+    [academicSchedules, collections, preferredTimetableId, rows],
+  );
+  const subjects = [...new Set(currentTimetableView.rows.map((row) => row.subject).filter(Boolean))];
+  const studyPreferences = {
+    ...defaultAiPreferences,
+    ...readStore("kmu-ai-preferences", {}),
+  };
   const [form, setForm] = useState({ subject: subjects[0] || "", examDate: "2026-12-14", dailyMinutes: 90, chapters: "1장 운영체제 개요 > 프로세스와 스레드\n2장 CPU 스케줄링 > FCFS, SJF, RR\n3장 동기화 > 세마포어와 모니터" });
   const [plan, setPlan] = useState(() => {
     const stored = readStore("kmu-study-plan");
@@ -680,58 +749,96 @@ export function StudyPlannerPage() {
       return;
     }
     const days = Math.max(1, Math.ceil((exam - start) / 86400000));
+    const candidateDates = Array.from({ length: days }, (_, index) => {
+      const value = new Date(start);
+      value.setDate(start.getDate() + index);
+      return dateKey(value);
+    });
     const storedSchedule = readStore("kmu-ai-schedule");
     const aiSchedule = Array.isArray(storedSchedule) ? storedSchedule : [];
     const otherSubjectPlans = plan.filter((item) => item.subject !== subject);
-    const occupiedByDate = new Map();
+    const dayState = new Map();
     const usedMinutesByDate = new Map();
     const result = [];
     let skipped = 0;
+    let shifted = 0;
+    const busyDates = new Set();
+
+    const scheduleForDate = (key) => {
+      if (dayState.has(key)) return dayState.get(key);
+      const timetableView = selectTimetableRowsForDate(
+        rows,
+        collections,
+        academicSchedules,
+        new Date(`${key}T12:00:00`),
+        preferredTimetableId,
+      );
+      const dayClasses = classesFor(timetableView.rows, key, academicSchedules);
+      const personal = personalSchedulesForDate(personalSchedules, key);
+      const commute = commuteBlocks(dayClasses, studyPreferences);
+      const studyEarliest = postCommuteStudyStart(dayClasses, studyPreferences.fromCampusMinutes);
+      const dayEnd = toMinutes(studyPreferences.availableEnd || "22:00");
+      const personalBusy = isPersonalScheduleHeavy(personal, studyEarliest, dayEnd);
+      const saved = aiSchedule.filter((item) => item.planDate === key && Number.isFinite(item.start) && Number.isFinite(item.end));
+      const otherStudyBlocks = otherSubjectPlans.filter((item) => item.date === key);
+      const value = {
+        occupied: [...dayClasses, ...personal, ...commute, ...saved, ...otherStudyBlocks],
+        studyEarliest,
+        dayEnd,
+        personalBusy,
+      };
+      dayState.set(key, value);
+      return value;
+    };
 
     for (const [index, section] of sections.entries()) {
-      const offset = Math.min(days - 1, Math.floor((index * days) / sections.length));
-      const date = new Date(start); date.setDate(start.getDate() + offset);
-      const key = dateKey(date);
-      if (!occupiedByDate.has(key)) {
-        const saved = aiSchedule.filter((item) => item.planDate === key && Number.isFinite(item.start) && Number.isFinite(item.end));
-        const otherStudyBlocks = otherSubjectPlans.filter((item) => item.date === key);
-        occupiedByDate.set(key, [...classesFor(rows, key), ...saved, ...otherStudyBlocks]);
+      const desiredIndex = Math.min(candidateDates.length - 1, Math.floor((index * candidateDates.length) / sections.length));
+      let placed = false;
+      for (let candidateIndex = desiredIndex; candidateIndex < candidateDates.length; candidateIndex += 1) {
+        const key = candidateDates[candidateIndex];
+        const state = scheduleForDate(key);
+        if (state.personalBusy) {
+          busyDates.add(key);
+          continue;
+        }
+        const used = usedMinutesByDate.get(key) || 0;
+        const remaining = dailyMinutes - used;
+        if (remaining < 30) continue;
+        const duration = Math.min(60, remaining);
+        const slot = freeSlots(
+          withTransitionBuffer(state.occupied),
+          Math.max(toMinutes(studyPreferences.availableStart || "07:00"), state.studyEarliest),
+          state.dayEnd,
+        ).find((value) => value.end - value.start >= duration + 15);
+        if (!slot) continue;
+        const item = {
+          id: createId(), date: key, start: slot.start, end: slot.start + duration,
+          subject, section, place: `${studyPreferences.homeLocation || "집"} 또는 가까운 학습 공간`,
+          review: false, done: false,
+        };
+        result.push(item);
+        state.occupied.push(item);
+        usedMinutesByDate.set(key, used + duration);
+        if (candidateIndex > desiredIndex) shifted += 1;
+        placed = true;
+        break;
       }
-      const used = usedMinutesByDate.get(key) || 0;
-      const remaining = dailyMinutes - used;
-      if (remaining < 30) {
+      if (!placed) {
         skipped += 1;
-        continue;
       }
-      const duration = Math.min(60, remaining);
-      const slots = freeSlots(withTransitionBuffer(occupiedByDate.get(key)), 540, 1320)
-        .filter((slot) => slot.end - slot.start >= duration);
-      const eveningSlot = slots.find((slot) => slot.start >= 1020);
-      const slot = eveningSlot || slots[slots.length - 1];
-      if (!slot) {
-        skipped += 1;
-        continue;
-      }
-      const item = {
-        id: createId(), date: key, start: slot.start, end: slot.start + duration,
-        subject, section, place: slot.start >= 1020 ? "동산도서관 열람실" : "공학관 라운지",
-        review: index === sections.length - 1, done: false,
-      };
-      result.push(item);
-      occupiedByDate.get(key).push(item);
-      usedMinutesByDate.set(key, used + duration);
     }
 
     if (!result.length) {
-      setMessage("시간표와 기존 과목 계획 사이에서 공부 시간을 찾지 못했습니다. 하루 목표 시간이나 시험일을 조정해주세요.");
+      setMessage("하교 이후 충분한 여유가 있는 날짜를 찾지 못했습니다. 개인 일정이나 시험일, 하루 목표 시간을 조정해주세요.");
       return;
     }
+    result[result.length - 1].review = true;
     const merged = [...otherSubjectPlans, ...result]
       .sort((a, b) => a.date.localeCompare(b.date) || a.start - b.start);
     setPlan(merged);
     const saved = writeStore("kmu-study-plan", merged);
     const subjectCount = new Set(merged.map((item) => item.subject)).size;
-    setMessage(`${subject} 계획 ${result.length}개를 추가했습니다. 현재 총 ${subjectCount}과목을 관리 중입니다.${skipped ? ` ${skipped}개 범위는 시간이 부족해 제외되었습니다.` : ""}${saved ? "" : " 브라우저 저장에는 실패했습니다."}`);
+    setMessage(`${subject} 계획 ${result.length}개를 하교 이후 시간에 추가했습니다. 현재 총 ${subjectCount}과목을 관리 중입니다.${shifted ? ` ${shifted}개 범위는 개인 일정이 적은 다음 날짜로 옮겼습니다.` : ""}${busyDates.size ? ` 개인 일정이 많은 ${busyDates.size}일은 건너뛰었습니다.` : ""}${skipped ? ` ${skipped}개 범위는 시험 전 여유 날짜가 없어 미배치되었습니다.` : ""}${saved ? "" : " 브라우저 저장에는 실패했습니다."}`);
   }
   function toggle(id) { const next = plan.map((item) => item.id === id ? { ...item, done: !item.done } : item); setPlan(next); writeStore("kmu-study-plan", next); }
   function removeSubject(subject) {
@@ -757,11 +864,15 @@ const campusActivities = [
   { min: 90, max: 300, title: "전시 관람과 캠퍼스 산책", place: "행소박물관", tag: "문화" },
 ];
 export function FreeTimePage() {
-  const { rows } = useSchedulerData(); const [date, setDate] = useState(dateKey(new Date()));
-  const classes = useMemo(() => classesFor(rows, date), [rows, date]);
+  const { rows, collections, academicSchedules, preferredTimetableId } = useSchedulerData(); const [date, setDate] = useState(dateKey(new Date()));
+  const timetableView = useMemo(
+    () => selectTimetableRowsForDate(rows, collections, academicSchedules, new Date(`${date}T12:00:00`), preferredTimetableId),
+    [academicSchedules, collections, date, preferredTimetableId, rows],
+  );
+  const classes = useMemo(() => classesFor(timetableView.rows, date, academicSchedules), [academicSchedules, date, timetableView.rows]);
   const gaps = freeSlots(classes, 540, 1320).filter((slot) => slot.end - slot.start >= 20);
   return <AIFrame title="공강 추천" description="실제 수업 사이 공강을 찾아 학교 안에서 할 수 있는 활동을 추천합니다." icon={Clock3}>
-    <section className="ai-panel"><header><div><h2>{dayNames[appliedDay(date)]}요일 공강</h2><p>09:00~22:00 시간표와 교내 이용 장소를 기준으로 추천합니다.</p></div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></header>
+    <section className="ai-panel"><header><div><h2>{dayNames[appliedDay(date, academicSchedules)]}요일 공강</h2><p>{timetableView.term.year}년 {timetableView.term.label} · 09:00~22:00 시간표와 교내 이용 장소를 기준으로 추천합니다.</p></div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></header>
       <div className="gap-grid">{gaps.length ? gaps.map((gap, index) => { const duration = gap.end - gap.start; const options = campusActivities.filter((item) => duration >= item.min).sort((a, b) => Math.abs(duration - a.max) - Math.abs(duration - b.max)).slice(0, 3); return <article className="gap-card" key={index}><div className="gap-time"><Clock3 /><b>{toTime(gap.start)}~{toTime(gap.end)}</b><span>{Math.floor(duration / 60) ? `${Math.floor(duration / 60)}시간 ` : ""}{duration % 60 ? `${duration % 60}분` : ""}</span></div>{options.map((item) => <div className="activity" key={item.title}><span>{item.tag}</span><div><b>{item.title}</b><small><MapPin />{item.place}</small></div></div>)}</article>; }) : <Empty text="이 날짜에는 추천 가능한 공강이 없습니다." />}</div>
     </section>
   </AIFrame>;

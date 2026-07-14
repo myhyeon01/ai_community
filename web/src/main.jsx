@@ -14,6 +14,7 @@ import {
 import { supabase } from "./supabase";
 import { loadUserState, readLocalState, removeUserState, saveUserState } from "./appState";
 import { recognizeTimetable } from "./ocr";
+import { areSimilarCourseColors, parseHexColor } from "./ocr-color";
 import Portal from "./Portal";
 import {
   courseCountLabel,
@@ -454,32 +455,17 @@ function ColorGroupEditor({ group, index, update, remove }) {
     </div>
   );
 }
-const parseOcrColor = (value) => {
-  const match = /^#([0-9a-f]{6})$/i.exec(String(value || ""));
-  if (!match) return null;
-  return {
-    r: Number.parseInt(match[1].slice(0, 2), 16),
-    g: Number.parseInt(match[1].slice(2, 4), 16),
-    b: Number.parseInt(match[1].slice(4, 6), 16),
-  };
-};
-const ocrColorDistance = (left, right) =>
-  Math.sqrt(
-    (left.r - right.r) ** 2 +
-      (left.g - right.g) ** 2 +
-      (left.b - right.b) ** 2,
-  );
 const ocrRowKey = (row, index) => row._ocr?.id || row.id || `ocr-row-${index}`;
 const buildOcrColorGroups = (rows) => {
   const groups = [];
   rows.forEach((row, index) => {
     const color = row.color || row._ocr?.color || "#64748b";
-    const rgb = parseOcrColor(color);
+    const rgb = parseHexColor(color);
     let group = rgb
       ? groups.find(
           (candidate) =>
             candidate.rgb &&
-            ocrColorDistance(candidate.rgb, rgb) <= 44,
+            areSimilarCourseColors(candidate.rgb, rgb),
         )
       : null;
     if (!group) {
