@@ -277,7 +277,7 @@
 .ac-week {
   position: relative;
   min-width: 0;
-  height: 142px;
+  height: 172px;
   border-bottom: 1px solid #e7edf4;
   background: #fff;
 }
@@ -314,30 +314,44 @@
   left: 0;
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
-  grid-template-rows: repeat(4, 24px);
+  grid-template-rows: repeat(4, 30px);
   row-gap: 4px;
   pointer-events: none;
 }
-.ac-event-bar {
+.ac-page .ac-event-bar {
+  display: flex;
+  align-items: center;
   overflow: hidden;
+  box-sizing: border-box;
+  width: auto;
+  max-width: none;
+  min-height: 30px;
   min-width: 0;
-  margin: 0 3px;
-  padding: 4px 9px;
+  margin: 0 1px;
+  padding: 5px 8px;
   border: 1px solid color-mix(in srgb, var(--cat) 45%, transparent);
   border-radius: 6px;
   background: var(--cat-soft);
   color: var(--cat);
-  font-size: 11px;
+  font-size: 11.5px;
   font-weight: 700;
+  line-height: 1.25;
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
   pointer-events: auto;
 }
-.ac-event-bar span {
+.ac-event-title {
   display: block;
   overflow: hidden;
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
   text-overflow: ellipsis;
+}
+.ac-event-bar.single-day {
+  padding-inline: 5px;
 }
 .ac-event-bar.continues-before {
   margin-left: 0;
@@ -364,7 +378,7 @@
 .ac-event-bar.active {
   filter: saturate(1.15);
 }
-.ac-more {
+.ac-page .ac-more {
   overflow: hidden;
   min-width: 0;
   margin: 0 4px;
@@ -514,7 +528,7 @@
     grid-template-columns: minmax(0, 1fr) 285px;
   }
   .ac-week {
-    height: 136px;
+    height: 172px;
   }
 }
 @media (max-width: 900px) {
@@ -600,20 +614,20 @@
     padding: 4px 3px;
   }
   .ac-week {
-    height: 150px;
+    height: 162px;
   }
   .ac-week-events {
     top: 35px;
-    grid-template-rows: repeat(4, 26px);
+    grid-template-rows: repeat(4, 29px);
     row-gap: 3px;
   }
-  .ac-event-bar {
-    min-height: 26px;
-    margin: 0 2px;
+  .ac-page .ac-event-bar {
+    min-height: 29px;
+    margin: 0 1px;
     padding: 4px 5px;
-    font-size: 9px;
+    font-size: 10px;
   }
-  .ac-more {
+  .ac-page .ac-more {
     margin: 0 2px;
     padding: 3px;
     font-size: 9px;
@@ -641,8 +655,8 @@
     justify-content: space-between;
     width: 100%;
   }
-  .ac-event-bar {
-    padding-inline: 4px;
+  .ac-page .ac-event-bar {
+    padding-inline: 3px;
   }
 }
 .ac-day {

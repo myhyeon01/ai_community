@@ -30,14 +30,26 @@ export function buildTodayView(timetable, schedules, now = new Date()) {
   const holiday = schedules.find((row) => ["공휴일", "휴업일"].includes(row.event_type) && row.start_date <= today && row.end_date >= today)
   const selected = new Map()
 
+  function withChange(row, status, change) {
+    return {
+      ...row,
+      status,
+      scheduleChange: change || null,
+      start_time: change?.changedStartTime || row.start_time,
+      end_time: change?.changedEndTime || row.end_time,
+      classroom: change?.changedClassroom || row.classroom,
+    }
+  }
+
   timetable.filter((row) => row.weekday === appliedWeekday).forEach((row) => {
     const makeup = makeupChanges.get(row.id)
-    selected.set(row.id, { ...row, status: makeup ? "보강" : holiday || originalChanges.has(row.id) ? "휴강" : "정규" })
+    const original = originalChanges.get(row.id)
+    selected.set(row.id, withChange(row, makeup ? "보강" : holiday || original ? "휴강" : "정규", makeup || original))
   })
   makeupChanges.forEach((change, id) => {
     if (!selected.has(id)) {
       const row = timetable.find((course) => course.id === id)
-      if (row) selected.set(id, { ...row, status: "보강" })
+      if (row) selected.set(id, withChange(row, "보강", change))
     }
   })
 
@@ -54,6 +66,10 @@ export function buildTodayView(timetable, schedules, now = new Date()) {
   const notices = []
   if (overrideIndex >= 0 && overrideIndex !== actualWeekday) notices.push(`오늘은 ${DAY_NAMES[appliedWeekday]}요일 수업이 진행됩니다.`)
   if (holiday) notices.push(`${holiday.title}: 오늘 수업은 휴강입니다.`)
+  const relationNotices = new Set([...originalChanges.values()].map((change) => change.changedDate
+    ? `${change.originalDate} → ${change.changedDate} 보강 예정`
+    : `${change.originalDate}: 보강 일정 미정`))
+  relationNotices.forEach((notice) => notices.push(notice))
   if (makeupChanges.size) notices.push(`공식 학사일정에 따른 보강 수업이 ${makeupChanges.size}건 있습니다.`)
 
   return { today, actualWeekday, appliedWeekday, override, lessons, active, next, remaining, notices }

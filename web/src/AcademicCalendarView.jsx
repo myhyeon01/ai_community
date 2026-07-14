@@ -263,7 +263,8 @@ export default function AcademicCalendarView({
                           <button
                             type="button"
                             aria-selected={selected}
-                            className={`ac-event-bar ${style.className} ${segment.continuesBefore ? "continues-before" : ""} ${segment.continuesAfter ? "continues-after" : ""} ${selected ? "active" : ""}`}
+                            aria-label={`${segment.event.title}, ${rangeLabel(segment.event)}`}
+                            className={`ac-event-bar ${style.className} ${segment.span === 1 ? "single-day" : ""} ${segment.continuesBefore ? "continues-before" : ""} ${segment.continuesAfter ? "continues-after" : ""} ${selected ? "active" : ""}`}
                             data-event-key={segment.event.calendarKey}
                             key={`${segment.event.calendarKey}-${segment.startDate}`}
                             title={`${segment.event.title} (${rangeLabel(segment.event)})`}
@@ -275,7 +276,9 @@ export default function AcademicCalendarView({
                               chooseEvent(segment.event, segment.startDate)
                             }
                           >
-                            <span>{segment.event.title}</span>
+                            <span className="ac-event-title">
+                              {segment.event.title}
+                            </span>
                           </button>
                         );
                       })}

@@ -24,15 +24,24 @@ export function calculateMakeupSchedules(schedules, timetable) {
 }
 
 function makeResult(course, row, originalDate, changedDate) {
+  const changedStartTime = (row.changed_start_time || row.changedStartTime)?.slice(0, 5) || null
+  const changedEndTime = (row.changed_end_time || row.changedEndTime)?.slice(0, 5) || null
+  const changedClassroom = row.changed_classroom || row.changedClassroom || null
   return {
     id: `${course.id}-${originalDate}`,
     timetableId: course.id,
     courseName: course.subject,
     originalDate,
     changedDate,
-    startTime: course.start_time?.slice(0, 5),
-    endTime: course.end_time?.slice(0, 5),
-    classroom: course.classroom,
+    startTime: changedStartTime || course.start_time?.slice(0, 5),
+    endTime: changedEndTime || course.end_time?.slice(0, 5),
+    classroom: changedClassroom || course.classroom,
+    originalStartTime: course.start_time?.slice(0, 5),
+    originalEndTime: course.end_time?.slice(0, 5),
+    originalClassroom: course.classroom,
+    changedStartTime,
+    changedEndTime,
+    changedClassroom,
     scheduleType: changedDate ? "보강" : "휴강",
     academicTitle: row.title,
   }
