@@ -52,6 +52,7 @@ export default function NotificationPage() {
   const [settings, setSettings] = useState(() => ({ ...defaultSettings, ...readJson("kmu-notification-settings", {}) }));
   const [settingsReady, setSettingsReady] = useState(false);
   const [rows, setRows] = useState([]);
+  const [activeTimetableId, setActiveTimetableId] = useState(null);
   const [personalSchedules, setPersonalSchedules] = useState(() => {
     const value = readJson("kmu-personal-schedules", []);
     return Array.isArray(value) ? value : [];
@@ -83,17 +84,60 @@ export default function NotificationPage() {
 
   useEffect(() => {
     let active = true;
-    Promise.all([
-      supabase.from("timetables").select("*").order("weekday").order("start_time"),
-      supabase.from("personal_schedules").select("*").order("schedule_date").order("start_time"),
-    ]).then(([courses, schedules]) => {
-      if (!active) return;
-      setRows(courses.data || []);
-      if (!schedules.error && Array.isArray(schedules.data)) {
-        writeLocalState("kmu-personal-schedules", schedules.data);
-        setPersonalSchedules(schedules.data);
+    async function loadSchedulerData() {
+      try {
+        const { data: authData, error: authError } = await supabase.auth.getUser();
+        const schedulesPromise = supabase
+          .from("personal_schedules")
+          .select("*")
+          .order("schedule_date")
+          .order("start_time");
+        let timetablePromise = Promise.resolve({ data: [], error: null });
+        let currentTimetableId = null;
+
+        if (!authError && authData.user) {
+          const savedTimetableId = Number(await loadUserState("kmu-active-timetable-id", null));
+          let collectionQuery = supabase
+            .from("timetable_collections")
+            .select("id")
+            .eq("user_id", authData.user.id);
+          if (Number.isFinite(savedTimetableId) && savedTimetableId > 0) {
+            collectionQuery = collectionQuery.eq("id", savedTimetableId);
+          } else {
+            collectionQuery = collectionQuery.order("updated_at", { ascending: false }).limit(1);
+          }
+          const { data: collections, error: collectionError } = await collectionQuery;
+          if (collectionError) throw collectionError;
+          currentTimetableId = collections?.[0]?.id || null;
+          if (currentTimetableId) {
+            timetablePromise = supabase
+              .from("timetables")
+              .select("*")
+              .eq("user_id", authData.user.id)
+              .eq("timetable_id", currentTimetableId)
+              .order("weekday")
+              .order("start_time");
+          }
+        }
+
+        const [courses, schedules] = await Promise.all([timetablePromise, schedulesPromise]);
+        if (!active) return;
+        if (courses.error) throw courses.error;
+        setActiveTimetableId(currentTimetableId);
+        setRows(courses.data || []);
+        if (!schedules.error && Array.isArray(schedules.data)) {
+          writeLocalState("kmu-personal-schedules", schedules.data);
+          setPersonalSchedules(schedules.data);
+        }
+      } catch (error) {
+        console.error("알림 시간표 로드 실패", error);
+        if (active) {
+          setActiveTimetableId(null);
+          setRows([]);
+        }
       }
-    });
+    }
+    loadSchedulerData();
     return () => { active = false; };
   }, []);
 
@@ -192,7 +236,7 @@ export default function NotificationPage() {
     }
 
     return items.sort((a, b) => Number(b.urgent) - Number(a.urgent) || a.sortAt - b.sortAt).slice(0, 18);
-  }, [aiSchedule, personalSchedules, rows, settings, studyPlan, tasks]);
+  }, [activeTimetableId, aiSchedule, personalSchedules, rows, settings, studyPlan, tasks]);
 
   useEffect(() => {
     if (permission !== "granted" || typeof Notification === "undefined") return undefined;
