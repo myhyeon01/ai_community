@@ -2,13 +2,21 @@
 
 ## 1. 테이블 생성
 
-Supabase Dashboard의 **SQL Editor → New query**에서
-`supabase/migrations/202607130001_profiles_and_timetables.sql` 파일 전체를 붙여넣고 **Run**을 누른다.
+Supabase Dashboard의 **SQL Editor → New query**에서 아래 파일을 순서대로 열어 전체를 붙여넣고 각각 **Run**을 누른다.
+
+1. `supabase/migrations/202607130001_profiles_and_timetables.sql`
+2. `supabase/migrations/202607130002_personal_schedules.sql`
+3. `supabase/migrations/202607130003_timetable_semesters.sql`
+4. `supabase/migrations/202607130004_timetable_collections.sql`
+5. `supabase/migrations/202607130005_user_app_state.sql`
 
 생성되는 항목:
 
 - `profiles`: 이름, 학번, 학과, 학년
 - `timetables`: 사용자별 수업 시간표
+- `personal_schedules`: 사용자 개인 일정
+- `timetable_collections`: 학년도·학기별 시간표 묶음
+- `user_app_state`: 관심 분야, 공지 즐겨찾기, AI 일정·공부계획, 알림 설정, 챗봇 기록 등 사용자별 앱 상태
 - 회원가입 프로필 자동 생성 트리거
 - 사용자가 본인 행에만 접근하는 RLS 정책
 

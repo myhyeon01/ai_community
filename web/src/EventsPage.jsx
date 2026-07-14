@@ -14,11 +14,14 @@ import {
   X,
 } from "lucide-react";
 import { api } from "./api";
+import { loadUserState, readLocalState } from "./appState";
 import "./events.css";
 
 let kmuSyncPromise = null;
+let lastKmuSyncAt = 0;
 
-async function syncKmuEventsOnce() {
+async function syncKmuEventsOnce(force = false) {
+  if (!force && Date.now() - lastKmuSyncAt < 10 * 60 * 1000) return [];
   if (!kmuSyncPromise) {
     kmuSyncPromise = Promise.allSettled([
       api("/events/sync/kmu?pages=5&limit=120", { method: "POST" }),
@@ -28,6 +31,7 @@ async function syncKmuEventsOnce() {
         if (results.every((result) => result.status === "rejected")) {
           throw results[0].reason;
         }
+        lastKmuSyncAt = Date.now();
         return results;
       })
       .finally(() => {
@@ -60,7 +64,7 @@ const actionCards = [
     id: "deadlines",
     title: "신청 마감",
     Icon: TimerReset,
-    description: "마감이 가까운 행사를 확인합니다.",
+    description: "30일 이내에 신청이 마감되는 행사를 확인합니다.",
   },
 ];
 
@@ -98,6 +102,35 @@ const sourceTypeOptions = [
   ["school", "학교 행사"],
   ["external", "교외 행사"],
 ];
+
+const interestAliases = {
+  "인공지능": "ai",
+  "AI": "ai",
+  "ai": "ai",
+  "백엔드": "major",
+  "프론트엔드": "major",
+  "개발": "major",
+  "소프트웨어": "major",
+  "전공": "major",
+  "취업": "career",
+  "진로": "career",
+  "공모전": "contest",
+  "문화": "culture",
+  "창업": "startup",
+  "봉사": "volunteer",
+  "글로벌": "global",
+  "교육": "education",
+};
+
+function savedInterests() {
+  const stored = readLocalState("kmu-interests", []);
+  if (!Array.isArray(stored)) return [];
+  return [...new Set(stored.flatMap((item) => {
+    const value = String(item || "").trim();
+    if (!value) return [];
+    return [interestAliases[value] || interestAliases[value.toLowerCase()] || value.toLowerCase()];
+  }))];
+}
 
 function toItems(data) {
   if (Array.isArray(data)) return data;
@@ -155,6 +188,21 @@ function sourceTypeLabel(value) {
   return value === "external" ? "교외 행사" : "";
 }
 
+function sourceInfo(event) {
+  const url = event.url || event.apply_url || "";
+  let hostname = "";
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    hostname = "";
+  }
+  if (hostname === "story.kmu.ac.kr") return { label: "Story+ 비교과", url };
+  if (hostname.endsWith("kmu.ac.kr")) {
+    return { label: event.source_type === "external" ? "계명대학교 교외행사 공지" : "계명대학교 공식 홈페이지", url };
+  }
+  return { label: hostname || "행사 원문", url };
+}
+
 function isKmuNoticeUrl(value) {
   try {
     const url = new URL(value);
@@ -181,6 +229,16 @@ function deadlineState(event) {
   if (diff === 0) return { label: "오늘 마감", closed: false, urgent: true };
   if (diff <= 3) return { label: `D-${diff}`, closed: false, urgent: true };
   return { label: `D-${diff}`, closed: false, urgent: false };
+}
+
+function isDeadlineWithinMonth(event) {
+  if (!event.apply_deadline || deadlineState(event).closed) return false;
+  const now = new Date();
+  const deadline = new Date(event.apply_deadline);
+  if (Number.isNaN(deadline.getTime())) return false;
+  deadline.setHours(23, 59, 59, 999);
+  const daysLeft = (deadline.getTime() - now.getTime()) / 86400000;
+  return daysLeft >= 0 && daysLeft <= 30;
 }
 
 function summaryLines(value) {
@@ -240,6 +298,7 @@ function EventCard({ event, onFavorite, favoriteBusy, showReason }) {
   const details = summaryLines(event.summary);
   const visibleDetails = expanded ? details.slice(0, 14) : details.slice(0, 4);
   const sourceType = event.source_type === "external" ? "external" : "school";
+  const source = sourceInfo(event);
 
   function openApply() {
     if (applyDisabled) return;
@@ -284,15 +343,17 @@ function EventCard({ event, onFavorite, favoriteBusy, showReason }) {
           <p>행사 설명이 준비되지 않았습니다.</p>
         )}
       </div>
-      {details.length > 4 && (
-        <button
-          className="detail-toggle"
-          onClick={() => setExpanded((value) => !value)}
-          type="button"
-        >
-          {expanded ? "접기" : "자세히 보기"}
-        </button>
-      )}
+      <div className="event-detail-action">
+        {details.length > 4 && (
+          <button
+            className="detail-toggle"
+            onClick={() => setExpanded((value) => !value)}
+            type="button"
+          >
+            {expanded ? "접기" : "자세히 보기"}
+          </button>
+        )}
+      </div>
       <div className="event-meta">
         <span>
           <CalendarDays />
@@ -321,15 +382,18 @@ function EventCard({ event, onFavorite, favoriteBusy, showReason }) {
         </div>
       )}
       <footer>
-        <small>{event.department || "전체 대상"}</small>
-        <button
-          className="apply-link"
-          disabled={applyDisabled}
-          onClick={openApply}
-          type="button"
-        >
-          {actionLabel} <ExternalLink />
-        </button>
+        <div className="event-origin">
+          <small>{event.department || "전체 대상"}</small>
+          {source.url && <a href={source.url} target="_blank" rel="noreferrer" title={`${source.label}에서 원문 보기`}><ExternalLink />출처 · {source.label}</a>}
+        </div>
+        {event.apply_url && event.apply_url !== source.url && <button
+            className="apply-link"
+            disabled={applyDisabled}
+            onClick={openApply}
+            type="button"
+          >
+            {actionLabel} <ExternalLink />
+          </button>}
       </footer>
     </article>
   );
@@ -386,7 +450,7 @@ export default function EventsPage({ profile }) {
   const [sort, setSort] = useState("upcoming");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [interests, setInterests] = useState([]);
+  const [interests, setInterests] = useState(savedInterests);
   const [events, setEvents] = useState([]);
   const [recommendations, setRecommendations] = useState([]);
   const [favorites, setFavorites] = useState([]);
@@ -404,7 +468,7 @@ export default function EventsPage({ profile }) {
   const deadlineItems = useMemo(
     () =>
       [...deadlines]
-        .filter((event) => !deadlineState(event).closed)
+        .filter(isDeadlineWithinMonth)
         .sort(
           (a, b) => dateValue(a.apply_deadline) - dateValue(b.apply_deadline),
         ),
@@ -427,6 +491,7 @@ export default function EventsPage({ profile }) {
           start_date: startDate,
           end_date: endDate,
           sort,
+          active_only: true,
           page: 1,
           limit: 24,
         });
@@ -435,7 +500,7 @@ export default function EventsPage({ profile }) {
         await syncKmuEventsOnce();
         items = toItems(await api(path));
       }
-      setEvents(items);
+      setEvents(items.filter((event) => !deadlineState(event).closed));
     } catch (e) {
       setEvents([]);
       setError(`행사 탐색을 불러오지 못했습니다. ${e.message}`);
@@ -448,12 +513,19 @@ export default function EventsPage({ profile }) {
     setLoad("recommendations", true);
     setError("");
     try {
+      try {
+        await syncKmuEventsOnce();
+      } catch {
+        // 저장된 행사 데이터가 있으면 추천은 계속 제공합니다.
+      }
       const path = withQuery("/events/recommendations", {
           interests,
+          department: profile?.department || "",
+          grade: profile?.grade || "",
         });
       let items = toItems(await api(path));
       if (!items.length) {
-        await syncKmuEventsOnce();
+        await syncKmuEventsOnce(true);
         items = toItems(await api(path));
       }
       setRecommendations(items);
@@ -463,7 +535,7 @@ export default function EventsPage({ profile }) {
     } finally {
       setLoad("recommendations", false);
     }
-  }, [interests, setLoad]);
+  }, [interests, profile?.department, profile?.grade, setLoad]);
 
   const loadFavorites = useCallback(async () => {
     setLoad("favorites", true);
@@ -497,6 +569,15 @@ export default function EventsPage({ profile }) {
       setLoad("deadlines", false);
     }
   }, [setLoad]);
+
+  useEffect(() => {
+    let active = true;
+    loadUserState("kmu-interests", []).then(() => {
+      if (!active) return;
+      setInterests(savedInterests());
+    });
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     loadEvents();
@@ -552,7 +633,7 @@ export default function EventsPage({ profile }) {
   async function reloadActive() {
     if (active !== "favorites") {
       try {
-        await syncKmuEventsOnce();
+        await syncKmuEventsOnce(true);
       } catch {
         // The following load call will surface the user-facing API error.
       }
@@ -623,6 +704,24 @@ export default function EventsPage({ profile }) {
                 loadEvents();
               }}
             >
+              <div className="event-filter-source-row">
+                <div
+                  aria-label="행사 출처"
+                  className="source-filter"
+                  role="group"
+                >
+                  {sourceTypeOptions.map(([id, label]) => (
+                    <button
+                      className={sourceType === id ? "active" : ""}
+                      key={id || "all-source-types"}
+                      onClick={() => setSourceType(id)}
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <label className="event-search">
                 <Search />
                 <input
@@ -643,22 +742,6 @@ export default function EventsPage({ profile }) {
                   </option>
                 ))}
               </select>
-              <div
-                aria-label="행사 출처"
-                className="source-filter"
-                role="group"
-              >
-                {sourceTypeOptions.map(([id, label]) => (
-                  <button
-                    className={sourceType === id ? "active" : ""}
-                    key={id || "all-source-types"}
-                    onClick={() => setSourceType(id)}
-                    type="button"
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
               <select
                 aria-label="정렬"
                 onChange={(e) => setSort(e.target.value)}
@@ -708,8 +791,8 @@ export default function EventsPage({ profile }) {
             <div className="recommend-context">
               <Sparkles />
               <span>
-                {profile?.department || "학과 정보 없음"} 기준으로 선택한 관심
-                분야를 함께 반영합니다.
+                {profile?.department || "학과 정보 없음"} · {profile?.grade ? `${profile.grade}학년` : "학년 미설정"}과
+                계정에 저장한 관심 분야를 함께 반영합니다.
               </span>
             </div>
             <InterestChips selected={interests} onToggle={toggleInterest} />
@@ -738,8 +821,8 @@ export default function EventsPage({ profile }) {
 
         {active === "deadlines" && (
           <EventList
-            emptyText="마감 예정 행사가 생기면 이곳에 표시됩니다."
-            emptyTitle="신청 마감 예정 행사가 없습니다."
+            emptyText="오늘부터 30일 이내에 신청이 마감되는 행사가 표시됩니다."
+            emptyTitle="한 달 이내 신청 마감 행사가 없습니다."
             favoriteBusy={favoriteBusy}
             items={deadlineItems}
             loading={loading.deadlines}

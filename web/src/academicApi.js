@@ -14,8 +14,12 @@ export async function getAcademicCalendar(force = false) {
   if (!academicRequest) {
     const controller = new AbortController()
     academicController = controller
-    const request = api("/academic-calendar", { signal: controller.signal })
-      .then((result) => (academicCache = result))
+    const now = new Date()
+    const academicYear = now.getMonth() < 2 ? now.getFullYear() - 1 : now.getFullYear()
+    const request = api(`/academic-calendar?year=${academicYear}`, { signal: controller.signal })
+      .then((result) => (academicCache = {
+        schedules: Array.isArray(result) ? result : result?.schedules || [],
+      }))
       .finally(() => {
         if (academicController === controller) {
           academicController = undefined

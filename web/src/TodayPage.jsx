@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react"
 import { CalendarDays, Clock3, MapPin, RefreshCw } from "lucide-react"
 import { supabase } from "./supabase"
 import { getAcademicCalendar } from "./academicApi"
+import { loadUserState } from "./appState"
 import { buildTodayView, DAY_NAMES } from "./today"
 import "./today.css"
 
@@ -13,9 +14,24 @@ export default function TodayPage() {
     try {
       const { data: authData, error: authError } = await supabase.auth.getUser()
       if (authError || !authData.user) throw authError || new Error("로그인 사용자 정보를 확인할 수 없습니다.")
+      const savedTimetableId = Number(await loadUserState("kmu-active-timetable-id", null))
+      let collectionQuery = supabase
+        .from("timetable_collections")
+        .select("id")
+        .eq("user_id", authData.user.id)
+      if (Number.isFinite(savedTimetableId) && savedTimetableId > 0) {
+        collectionQuery = collectionQuery.eq("id", savedTimetableId)
+      } else {
+        collectionQuery = collectionQuery.order("updated_at", { ascending: false }).limit(1)
+      }
+      const { data: collections, error: collectionError } = await collectionQuery
+      if (collectionError) throw collectionError
+      const activeTimetableId = collections?.[0]?.id
       const [calendarResult, timetable] = await Promise.all([
         getAcademicCalendar(force).then((calendar) => ({ calendar })).catch((error) => ({ error })),
-        supabase.from("timetables").select("*").eq("user_id", authData.user.id).order("weekday").order("start_time"),
+        activeTimetableId
+          ? supabase.from("timetables").select("*").eq("user_id", authData.user.id).eq("timetable_id", activeTimetableId).order("weekday").order("start_time")
+          : Promise.resolve({ data: [], error: null }),
       ])
       const academicError = calendarResult.error ? "학사일정 정보를 불러오지 못했습니다." : ""
       if (calendarResult.error) console.error("오늘 수업 학사일정 요청 실패", { error: calendarResult.error, academicUrl: "http://localhost:8000/api/v1/academic-calendar" })

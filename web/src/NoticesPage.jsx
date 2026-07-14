@@ -10,18 +10,15 @@ import {
   X,
 } from "lucide-react";
 import { api } from "./api";
+import { loadUserState, readLocalState, saveUserState } from "./appState";
 import "./notices.css";
 
 const CATEGORIES = ["전체", "학사", "장학", "취업", "행사", "기타"];
 const FAVORITES_KEY = "kmu-notice-favorites";
 
 function readFavorites() {
-  try {
-    const value = JSON.parse(localStorage.getItem(FAVORITES_KEY) || "[]");
-    return new Set(Array.isArray(value) ? value.map(String) : []);
-  } catch {
-    return new Set();
-  }
+  const value = readLocalState(FAVORITES_KEY, []);
+  return new Set(Array.isArray(value) ? value.map(String) : []);
 }
 
 function formatFetchedAt(value) {
@@ -49,6 +46,7 @@ export default function NoticesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [favorites, setFavorites] = useState(readFavorites);
+  const [favoritesReady, setFavoritesReady] = useState(false);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -84,8 +82,18 @@ export default function NoticesPage() {
   }, [loadNotices]);
 
   useEffect(() => {
-    localStorage.setItem(FAVORITES_KEY, JSON.stringify([...favorites]));
-  }, [favorites]);
+    let active = true;
+    loadUserState(FAVORITES_KEY, []).then((value) => {
+      if (!active) return;
+      setFavorites(new Set(Array.isArray(value) ? value.map(String) : []));
+      setFavoritesReady(true);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (favoritesReady) saveUserState(FAVORITES_KEY, [...favorites]);
+  }, [favorites, favoritesReady]);
 
   const visibleItems = useMemo(
     () => favoritesOnly ? data.items.filter((item) => favorites.has(String(item.id))) : data.items,
