@@ -33,7 +33,7 @@ import "./week.css";
 import "./cleanup.css";
 import "./groups.css";
 import "./timetable-actions.css";
-const days = ["월", "화", "수", "목", "금", "토", "일"],
+const days = ["월", "화", "수", "목", "금"],
   semesterOptions = [
     { value: "1", label: "1학기", starts: "03-02", ends: "06-21" },
     { value: "summer", label: "여름학기", starts: "06-22", ends: "07-19" },
@@ -590,11 +590,11 @@ function TimetableForm({
           />
         </label>
         <div className="timetable-form-preview">{resolvedTitle}</div>
-        <footer>
-          <button type="button" className="secondary" onClick={onCancel}>
+        <footer style={{ alignItems: "center" }}>
+          <button type="button" className="secondary" style={{ marginTop: 0 }} onClick={onCancel}>
             취소
           </button>
-          <button className="primary">{submitLabel}</button>
+          <button className="primary" style={{ padding: "10px 15px" }}>{submitLabel}</button>
         </footer>
       </form>
     </section>
@@ -846,11 +846,11 @@ function Register({
             <Plus />
             수업 직접 추가
           </button>
-          <footer>
-            <button type="button" className="secondary" onClick={back}>
+          <footer style={{ alignItems: "center" }}>
+            <button type="button" className="secondary" style={{ marginTop: 0 }} onClick={back}>
               취소
             </button>
-            <button className="primary">{rows.length}개 수업 저장</button>
+            <button className="primary" style={{ padding: "10px 15px" }}>{rows.length}개 수업 저장</button>
           </footer>
         </form>
       </section>
@@ -909,7 +909,7 @@ function WeeklyBoard({ rows, selectedYear, selectedSemester }) {
       </div>
       <div className="week-range">
         {weekStart.getFullYear()}.{monthDay(weekDates[0])} -{" "}
-        {weekDates[6].getFullYear()}.{monthDay(weekDates[6])}
+        {weekDates[days.length - 1].getFullYear()}.{monthDay(weekDates[days.length - 1])}
       </div>
       {!inPeriod && (
         <div className="semester-alert">
