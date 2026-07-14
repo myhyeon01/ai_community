@@ -346,15 +346,17 @@ function EventCard({ event, onFavorite, favoriteBusy, showReason }) {
           <p>행사 설명이 준비되지 않았습니다.</p>
         )}
       </div>
-      {details.length > 4 && (
-        <button
-          className="detail-toggle"
-          onClick={() => setExpanded((value) => !value)}
-          type="button"
-        >
-          {expanded ? "접기" : "자세히 보기"}
-        </button>
-      )}
+      <div className="event-detail-action">
+        {details.length > 4 && (
+          <button
+            className="detail-toggle"
+            onClick={() => setExpanded((value) => !value)}
+            type="button"
+          >
+            {expanded ? "접기" : "자세히 보기"}
+          </button>
+        )}
+      </div>
       <div className="event-meta">
         <span>
           <CalendarDays />
@@ -696,6 +698,24 @@ export default function EventsPage({ profile }) {
                 loadEvents();
               }}
             >
+              <div className="event-filter-source-row">
+                <div
+                  aria-label="행사 출처"
+                  className="source-filter"
+                  role="group"
+                >
+                  {sourceTypeOptions.map(([id, label]) => (
+                    <button
+                      className={sourceType === id ? "active" : ""}
+                      key={id || "all-source-types"}
+                      onClick={() => setSourceType(id)}
+                      type="button"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <label className="event-search">
                 <Search />
                 <input
@@ -716,22 +736,6 @@ export default function EventsPage({ profile }) {
                   </option>
                 ))}
               </select>
-              <div
-                aria-label="행사 출처"
-                className="source-filter"
-                role="group"
-              >
-                {sourceTypeOptions.map(([id, label]) => (
-                  <button
-                    className={sourceType === id ? "active" : ""}
-                    key={id || "all-source-types"}
-                    onClick={() => setSourceType(id)}
-                    type="button"
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
               <select
                 aria-label="정렬"
                 onChange={(e) => setSort(e.target.value)}
