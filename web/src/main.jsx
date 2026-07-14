@@ -434,17 +434,56 @@ function ColorGroupEditor({ group, index, update, remove }) {
     </div>
   );
 }
-const normalizeOcrGroupText = (value) =>
-  String(value || "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-const ocrGroupKey = (row, index) => {
-  const subject = normalizeOcrGroupText(row.subject),
-    classroom = normalizeOcrGroupText(row.classroom);
-  return subject && classroom
-    ? `${subject}::${classroom}`
-    : row._ocr?.id || `ocr-row-${index}`;
+const parseOcrColor = (value) => {
+  const match = /^#([0-9a-f]{6})$/i.exec(String(value || ""));
+  if (!match) return null;
+  return {
+    r: Number.parseInt(match[1].slice(0, 2), 16),
+    g: Number.parseInt(match[1].slice(2, 4), 16),
+    b: Number.parseInt(match[1].slice(4, 6), 16),
+  };
+};
+const ocrColorDistance = (left, right) =>
+  Math.sqrt(
+    (left.r - right.r) ** 2 +
+      (left.g - right.g) ** 2 +
+      (left.b - right.b) ** 2,
+  );
+const ocrRowKey = (row, index) => row._ocr?.id || row.id || `ocr-row-${index}`;
+const buildOcrColorGroups = (rows) => {
+  const groups = [];
+  rows.forEach((row, index) => {
+    const color = row.color || row._ocr?.color || "#64748b";
+    const rgb = parseOcrColor(color);
+    let group = rgb
+      ? groups.find(
+          (candidate) =>
+            candidate.rgb &&
+            ocrColorDistance(candidate.rgb, rgb) <= 44,
+        )
+      : null;
+    if (!group) {
+      group = {
+        key: `ocr-color-${color.toLowerCase()}-${groups.length}`,
+        color,
+        rgb,
+        rows: [],
+        rowKeys: new Set(),
+      };
+      groups.push(group);
+    }
+    group.rows.push(row);
+    group.rowKeys.add(ocrRowKey(row, index));
+    if (rgb) {
+      const count = group.rows.length;
+      group.rgb = {
+        r: (group.rgb.r * (count - 1) + rgb.r) / count,
+        g: (group.rgb.g * (count - 1) + rgb.g) / count,
+        b: (group.rgb.b * (count - 1) + rgb.b) / count,
+      };
+    }
+  });
+  return groups;
 };
 function TimetableForm({
   title,
@@ -639,25 +678,29 @@ function Register({
       : await supabase.from("timetables").insert(payload);
     error ? setError(error.message) : saved();
   }
-  const colorGroups = Object.values(
-    rows.reduce((result, row, index) => {
-      const key = ocrGroupKey(row, index);
-      if (!result[key])
-        result[key] = { key, color: row.color || "#64748b", rows: [] };
-      result[key].rows.push(row);
-      return result;
-    }, {}),
-  );
+  const colorGroups = buildOcrColorGroups(rows);
   const updateColorGroup = (groupKey, key, value) =>
-    setRows(
-      rows.map((row, index) =>
-        ocrGroupKey(row, index) === groupKey
+    setRows((currentRows) => {
+      const group = buildOcrColorGroups(currentRows).find(
+        (item) => item.key === groupKey,
+      );
+      if (!group) return currentRows;
+      return currentRows.map((row, index) =>
+        group.rowKeys.has(ocrRowKey(row, index))
           ? { ...row, [key]: value }
           : row,
-      ),
-    );
+      );
+    });
   const removeColorGroup = (groupKey) =>
-    setRows(rows.filter((row, index) => ocrGroupKey(row, index) !== groupKey));
+    setRows((currentRows) => {
+      const group = buildOcrColorGroups(currentRows).find(
+        (item) => item.key === groupKey,
+      );
+      if (!group) return currentRows;
+      return currentRows.filter(
+        (row, index) => !group.rowKeys.has(ocrRowKey(row, index)),
+      );
+    });
   return (
     <div className="content">
       <section className="card register">
