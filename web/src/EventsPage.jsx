@@ -17,8 +17,10 @@ import { api } from "./api";
 import "./events.css";
 
 let kmuSyncPromise = null;
+let lastKmuSyncAt = 0;
 
-async function syncKmuEventsOnce() {
+async function syncKmuEventsOnce(force = false) {
+  if (!force && Date.now() - lastKmuSyncAt < 10 * 60 * 1000) return [];
   if (!kmuSyncPromise) {
     kmuSyncPromise = Promise.allSettled([
       api("/events/sync/kmu?pages=5&limit=120", { method: "POST" }),
@@ -28,6 +30,7 @@ async function syncKmuEventsOnce() {
         if (results.every((result) => result.status === "rejected")) {
           throw results[0].reason;
         }
+        lastKmuSyncAt = Date.now();
         return results;
       })
       .finally(() => {
@@ -99,6 +102,39 @@ const sourceTypeOptions = [
   ["external", "교외 행사"],
 ];
 
+const interestAliases = {
+  "인공지능": "ai",
+  "AI": "ai",
+  "ai": "ai",
+  "백엔드": "major",
+  "프론트엔드": "major",
+  "개발": "major",
+  "소프트웨어": "major",
+  "전공": "major",
+  "취업": "career",
+  "진로": "career",
+  "공모전": "contest",
+  "문화": "culture",
+  "창업": "startup",
+  "봉사": "volunteer",
+  "글로벌": "global",
+  "교육": "education",
+};
+
+function savedInterests() {
+  try {
+    const stored = JSON.parse(localStorage.getItem("kmu-interests"));
+    if (!Array.isArray(stored)) return [];
+    return [...new Set(stored.flatMap((item) => {
+      const value = String(item || "").trim();
+      if (!value) return [];
+      return [interestAliases[value] || interestAliases[value.toLowerCase()] || value.toLowerCase()];
+    }))];
+  } catch {
+    return [];
+  }
+}
+
 function toItems(data) {
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.items)) return data.items;
@@ -153,6 +189,21 @@ function formatRange(event) {
 
 function sourceTypeLabel(value) {
   return value === "external" ? "교외 행사" : "";
+}
+
+function sourceInfo(event) {
+  const url = event.url || event.apply_url || "";
+  let hostname = "";
+  try {
+    hostname = new URL(url).hostname;
+  } catch {
+    hostname = "";
+  }
+  if (hostname === "story.kmu.ac.kr") return { label: "Story+ 비교과", url };
+  if (hostname.endsWith("kmu.ac.kr")) {
+    return { label: event.source_type === "external" ? "계명대학교 교외행사 공지" : "계명대학교 공식 홈페이지", url };
+  }
+  return { label: hostname || "행사 원문", url };
 }
 
 function isKmuNoticeUrl(value) {
@@ -240,6 +291,7 @@ function EventCard({ event, onFavorite, favoriteBusy, showReason }) {
   const details = summaryLines(event.summary);
   const visibleDetails = expanded ? details.slice(0, 14) : details.slice(0, 4);
   const sourceType = event.source_type === "external" ? "external" : "school";
+  const source = sourceInfo(event);
 
   function openApply() {
     if (applyDisabled) return;
@@ -321,15 +373,18 @@ function EventCard({ event, onFavorite, favoriteBusy, showReason }) {
         </div>
       )}
       <footer>
-        <small>{event.department || "전체 대상"}</small>
-        <button
-          className="apply-link"
-          disabled={applyDisabled}
-          onClick={openApply}
-          type="button"
-        >
-          {actionLabel} <ExternalLink />
-        </button>
+        <div className="event-origin">
+          <small>{event.department || "전체 대상"}</small>
+          {source.url && <a href={source.url} target="_blank" rel="noreferrer" title={`${source.label}에서 원문 보기`}><ExternalLink />출처 · {source.label}</a>}
+        </div>
+        {event.apply_url && event.apply_url !== source.url && <button
+            className="apply-link"
+            disabled={applyDisabled}
+            onClick={openApply}
+            type="button"
+          >
+            {actionLabel} <ExternalLink />
+          </button>}
       </footer>
     </article>
   );
@@ -386,7 +441,7 @@ export default function EventsPage({ profile }) {
   const [sort, setSort] = useState("upcoming");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
-  const [interests, setInterests] = useState([]);
+  const [interests, setInterests] = useState(savedInterests);
   const [events, setEvents] = useState([]);
   const [recommendations, setRecommendations] = useState([]);
   const [favorites, setFavorites] = useState([]);
@@ -448,12 +503,19 @@ export default function EventsPage({ profile }) {
     setLoad("recommendations", true);
     setError("");
     try {
+      try {
+        await syncKmuEventsOnce();
+      } catch {
+        // 저장된 행사 데이터가 있으면 추천은 계속 제공합니다.
+      }
       const path = withQuery("/events/recommendations", {
           interests,
+          department: profile?.department || "",
+          grade: profile?.grade || "",
         });
       let items = toItems(await api(path));
       if (!items.length) {
-        await syncKmuEventsOnce();
+        await syncKmuEventsOnce(true);
         items = toItems(await api(path));
       }
       setRecommendations(items);
@@ -463,7 +525,7 @@ export default function EventsPage({ profile }) {
     } finally {
       setLoad("recommendations", false);
     }
-  }, [interests, setLoad]);
+  }, [interests, profile?.department, profile?.grade, setLoad]);
 
   const loadFavorites = useCallback(async () => {
     setLoad("favorites", true);
@@ -552,7 +614,7 @@ export default function EventsPage({ profile }) {
   async function reloadActive() {
     if (active !== "favorites") {
       try {
-        await syncKmuEventsOnce();
+        await syncKmuEventsOnce(true);
       } catch {
         // The following load call will surface the user-facing API error.
       }
@@ -708,8 +770,8 @@ export default function EventsPage({ profile }) {
             <div className="recommend-context">
               <Sparkles />
               <span>
-                {profile?.department || "학과 정보 없음"} 기준으로 선택한 관심
-                분야를 함께 반영합니다.
+                {profile?.department || "학과 정보 없음"} · {profile?.grade ? `${profile.grade}학년` : "학년 미설정"}과
+                계정에 저장한 관심 분야를 함께 반영합니다.
               </span>
             </div>
             <InterestChips selected={interests} onToggle={toggleInterest} />

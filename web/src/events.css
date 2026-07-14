@@ -591,6 +591,32 @@
   white-space: nowrap;
 }
 
+.event-origin {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.event-origin a {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  color: #245ca8;
+  font-size: 10px;
+  font-weight: 850;
+  text-decoration: none;
+}
+
+.event-origin a:hover {
+  text-decoration: underline;
+}
+
+.event-origin a svg {
+  width: 12px;
+  height: 12px;
+}
+
 .apply-link {
   display: inline-flex;
   align-items: center;

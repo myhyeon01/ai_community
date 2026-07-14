@@ -26,6 +26,16 @@
 
 .ai-two-column {
   grid-template-columns: minmax(360px, .9fr) minmax(430px, 1.1fr);
+  align-items: start;
+}
+
+.ai-two-column > .ai-panel {
+  width: 100%;
+  overflow: hidden;
+}
+
+.ai-panel > header {
+  flex-wrap: wrap;
 }
 
 .ai-panel input,
@@ -183,6 +193,91 @@
   line-height: 1.45;
 }
 
+.timeline .personal i {
+  background: #ee8a3b;
+}
+
+.timeline .personal > div {
+  border-color: #f3d7c1;
+  background: #fffaf6;
+}
+
+.timeline .study i {
+  background: #7656c6;
+}
+
+.timeline .study > div {
+  border-color: #ddd3f4;
+  background: #fbf9ff;
+}
+
+.timeline .commute i {
+  background: #2d78a8;
+}
+
+.timeline .commute > div {
+  border-color: #cde1ee;
+  background: #f4fbff;
+}
+
+.ai-primary:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+
+.commute-settings {
+  margin-top: 14px;
+  border: 1px solid #dce6f3;
+  border-radius: 12px;
+  background: #f8fbff;
+  padding: 12px;
+}
+
+.commute-settings > header {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 10px;
+  color: #315d9b;
+}
+
+.commute-settings > header svg {
+  width: 20px;
+}
+
+.commute-settings > header b,
+.commute-settings > header small {
+  display: block;
+}
+
+.commute-settings > header b {
+  font-size: 11px;
+}
+
+.commute-settings > header small {
+  margin-top: 2px;
+  color: #7b889a;
+  font-size: 9px;
+}
+
+.commute-settings > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.commute-settings label {
+  display: grid;
+  gap: 5px;
+  color: #52617a;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.commute-settings input {
+  height: 38px;
+}
+
 @media (max-width: 700px) {
   .ai-feature-page > .ai-hero {
     padding: 18px 20px;
@@ -204,5 +299,24 @@
 
   .study-plan-list article > div:last-child {
     grid-column: 2;
+  }
+
+  .commute-settings > div {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .commute-settings label:first-child {
+    grid-column: 1 / -1;
+  }
+
+}
+
+@media (min-width: 701px) and (max-width: 1180px) {
+  .commute-settings > div {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .commute-settings label:first-child {
+    grid-column: 1 / -1;
   }
 }

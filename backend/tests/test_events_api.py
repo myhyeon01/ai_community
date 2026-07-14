@@ -108,6 +108,79 @@ def test_events_list_and_recommendations():
     assert data[0]["recommendation_reason"]
 
 
+def test_fourth_year_recommendations_prioritize_career_and_explain_reason():
+    client = make_client(seed=False)
+    with next(app.dependency_overrides[get_db]()) as db:
+        now = datetime.utcnow()
+        db.add_all(
+            [
+                models.SchoolEvent(
+                    title="문화 체험 프로그램",
+                    summary="교내 문화 체험",
+                    starts_at=now + timedelta(days=1),
+                    ends_at=now + timedelta(days=1, hours=2),
+                    category="비교과",
+                    department="학생지원팀",
+                    location="바우어관",
+                    interests="culture",
+                    url="https://story.kmu.ac.kr/user/Ep/EpMng010PD.do?PRM_SEQ=1",
+                    apply_url="https://story.kmu.ac.kr/user/Ep/EpMng010PD.do?PRM_SEQ=1",
+                    source_key="story:1",
+                ),
+                models.SchoolEvent(
+                    title="취업 면접과 포트폴리오 특강",
+                    summary="채용 준비와 직무 면접 실습",
+                    starts_at=now + timedelta(days=5),
+                    ends_at=now + timedelta(days=5, hours=2),
+                    category="특강",
+                    department="취업지원팀",
+                    location="동천관",
+                    interests="career",
+                    url="https://story.kmu.ac.kr/user/Ep/EpMng010PD.do?PRM_SEQ=2",
+                    apply_url="https://story.kmu.ac.kr/user/Ep/EpMng010PD.do?PRM_SEQ=2",
+                    source_key="story:2",
+                ),
+            ]
+        )
+        db.commit()
+
+    response = client.get("/api/v1/events/recommendations?grade=4")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data[0]["title"] == "취업 면접과 포트폴리오 특강"
+    assert "4학년" in data[0]["recommendation_reason"]
+    assert "Story+" in data[0]["recommendation_reason"]
+
+
+def test_recommendations_exclude_expired_application():
+    client = make_client(seed=False)
+    with next(app.dependency_overrides[get_db]()) as db:
+        now = datetime.utcnow()
+        db.add(
+            models.SchoolEvent(
+                title="신청이 끝난 비교과",
+                summary="운영일은 남았지만 신청은 마감되었습니다.",
+                starts_at=now + timedelta(days=5),
+                ends_at=now + timedelta(days=5, hours=2),
+                apply_deadline=now - timedelta(days=1),
+                category="비교과",
+                department="Story+",
+                location="온라인",
+                interests="education",
+                url="https://story.kmu.ac.kr/user/Ep/EpMng010PD.do?PRM_SEQ=9",
+                apply_url="https://story.kmu.ac.kr/user/Ep/EpMng010PD.do?PRM_SEQ=9",
+                source_key="story:9",
+            )
+        )
+        db.commit()
+
+    response = client.get("/api/v1/events/recommendations")
+
+    assert response.status_code == 200
+    assert response.json() == []
+
+
 def test_events_filter_by_source_type():
     client = make_client()
 

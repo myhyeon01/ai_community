@@ -63,6 +63,14 @@ class SchoolEventOut(ORM):
     is_favorite: bool = False
     recommendation_reason: str = ""
 
+class AIScheduleRequest(BaseModel):
+    context: dict = Field(default_factory=dict)
+
+class AIScheduleChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=1000)
+    context: dict = Field(default_factory=dict)
+    history: list[dict] = Field(default_factory=list)
+
 class TodayCourse(BaseModel):
     course_id: int; name: str; professor: str; classroom: str; start_time: time; end_time: time
 
