@@ -38,7 +38,7 @@ export function SearchPage({ onNavigate }) {
     const data = [
       ...rows.map((item) => ({ id: `course-${item.id}`, category: "과목", title: item.subject, detail: `${dayNames[item.weekday] || ""}요일 ${String(item.start_time).slice(0, 5)}~${String(item.end_time).slice(0, 5)} · ${item.classroom || "강의실 미정"}`, date: "주간 시간표", page: "timetable" })),
       ...academicFallback2026.map((item) => ({ id: `academic-${item.id}`, category: "학사일정", title: item.title, detail: item.start_date === item.end_date ? item.start_date : `${item.start_date} ~ ${item.end_date}`, date: item.start_date, page: "academic", urgent: /보강|휴강|휴업/.test(item.title) })),
-      ...schoolEvents.map((item) => ({ id: `event-${item.id}`, category: "학교행사", title: item.title, detail: `${item.date} · ${item.place}`, date: item.date, page: "recommend" })),
+      ...schoolEvents.map((item) => ({ id: `event-${item.id}`, category: "학교행사", title: item.title, detail: `${item.date} · ${item.place}`, date: item.date, page: "events" })),
       ...(Array.isArray(tasks) ? tasks.map((item) => ({ id: `task-${item.id}`, category: "AI 일정", title: item.title, detail: `${item.deadline}까지 · 우선순위 ${item.priority}`, date: item.deadline, page: "ai-plan" })) : []),
       ...(Array.isArray(study) ? study.map((item) => ({ id: `study-${item.id}`, category: "공부계획", title: item.subject, detail: `${item.date}까지 · ${item.section}`, date: item.date, page: "study" })) : []),
     ];

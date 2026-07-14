@@ -25,10 +25,10 @@ import PersonalSchedulePage from "./PersonalSchedulePage";
 import EventsPage from "./EventsPage";
 import TodayPage from "./TodayPage";
 import NoticesPage from "./NoticesPage";
+import SmartChatbot from "./SmartChatbot";
 import { AccountPage, ExtrasPage, SearchPage } from "./UtilityPages";
 import {
   AISchedulePage,
-  EventRecommendPage,
   FreeTimePage,
   StudyPlannerPage,
 } from "./AIHub";
@@ -127,13 +127,6 @@ const pages = [
     ["공강 탐색", "과제·복습", "식사·휴식", "교내 활동"],
   ],
   [
-    "recommend",
-    "행사 추천",
-    Sparkles,
-    "학과와 관심 분야에 맞는 행사를 추천합니다.",
-    ["전공 행사", "취업 행사", "공모전", "추천 이유"],
-  ],
-  [
     "extras",
     "강의실 찾기",
     Map,
@@ -141,6 +134,13 @@ const pages = [
     ["강의실 검색", "건물 안내", "성서캠퍼스", "대명캠퍼스"],
   ],
 ];
+
+const chatbotGuide = pages.map(([id, title, , description, features]) => ({
+  id,
+  title,
+  description,
+  features,
+}));
 
 function EmptyPage({ page, onNavigate }) {
   const [, title, Icon, description, items] = page;
@@ -329,8 +329,6 @@ export default function Portal({ session, timetable }) {
             <StudyPlannerPage />
           ) : active === "free-time" ? (
             <FreeTimePage />
-          ) : active === "recommend" ? (
-            <EventRecommendPage />
           ) : active === "notifications" ? (
             <NotificationPage />
           ) : active === "personal" ? (
@@ -346,6 +344,7 @@ export default function Portal({ session, timetable }) {
           )}
         </div>
       </main>
+      <SmartChatbot activePage={active} profile={profile} pageGuide={chatbotGuide} onNavigate={navigate} />
     </div>
   );
 }

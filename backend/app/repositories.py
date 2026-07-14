@@ -239,12 +239,25 @@ class SchoolEventRepository:
             return "school"
         return data.get("source_type") or "school"
 
-    def recommendations(self, user: models.User, interests: str = "", limit: int = 12):
+    def recommendations(
+        self,
+        user: models.User,
+        interests: str = "",
+        limit: int = 12,
+        department: str = "",
+        grade: int | None = None,
+    ):
         now = datetime.utcnow()
         events = list(
             self.db.scalars(
                 select(models.SchoolEvent)
-                .where(models.SchoolEvent.ends_at >= now)
+                .where(
+                    models.SchoolEvent.ends_at >= now,
+                    or_(
+                        models.SchoolEvent.apply_deadline.is_(None),
+                        models.SchoolEvent.apply_deadline >= now,
+                    ),
+                )
                 .order_by(
                     models.SchoolEvent.apply_deadline.is_(None),
                     models.SchoolEvent.apply_deadline,
@@ -255,20 +268,44 @@ class SchoolEventRepository:
             )
         )
         selected = set(self._tokens(interests) + self._tokens(user.interests))
-        department = (user.department or "").strip().lower()
+        user_department = (department or user.department or "").strip().lower()
+        user_grade = grade or user.grade or 1
+        career_keywords = ("career", "취업", "채용", "인턴", "직무", "자소서", "면접", "포트폴리오")
+        major_keywords = ("major", "전공", "ai", "인공지능", "소프트웨어", "개발", "프로그래밍")
         scored = []
         for event in events:
             score = 0
             reasons = []
             event_department = (event.department or "").lower()
             event_tags = set(self._tokens(getattr(event, "interests", "")))
-            if department and event_department and (department in event_department or event_department in department):
+            event_text = " ".join(
+                [
+                    event.title or "",
+                    getattr(event, "summary", "") or "",
+                    event.category or "",
+                    event.department or "",
+                    getattr(event, "interests", "") or "",
+                ]
+            ).lower()
+            if user_department and event_department and (user_department in event_department or event_department in user_department):
                 score += 4
                 reasons.append("학과와 관련된 행사입니다.")
-            matched = sorted(selected & event_tags)
+            matched = sorted(token for token in selected if token in event_tags or token in event_text)
             if matched:
                 score += len(matched) * 3
                 reasons.append(f"관심 분야({', '.join(matched)})와 맞습니다.")
+            if user_grade >= 4 and any(keyword in event_text for keyword in career_keywords):
+                score += 6
+                reasons.append(f"{user_grade}학년의 취업 준비에 도움이 되는 프로그램입니다.")
+            elif user_grade == 3 and any(keyword in event_text for keyword in career_keywords):
+                score += 3
+                reasons.append("진로·취업 준비를 시작하기 좋은 프로그램입니다.")
+            elif user_grade <= 2 and any(keyword in event_text for keyword in major_keywords):
+                score += 2
+                reasons.append("저학년 전공 탐색과 역량 개발에 적합합니다.")
+            if (getattr(event, "source_key", "") or "").startswith("story:"):
+                score += 1
+                reasons.append("Story+에 등록된 비교과 프로그램입니다.")
             if event.apply_deadline and event.apply_deadline >= now:
                 score += 1
             if not reasons:

@@ -2,22 +2,22 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   BookOpenCheck,
   Brain,
-  CalendarCheck,
   Check,
   Clock3,
   Coffee,
   MapPin,
   Plus,
+  Route,
   Sparkles,
-  Star,
   Trash2,
 } from "lucide-react";
 import { supabase } from "./supabase";
 import { academicFallback2026 } from "./academicData";
+import { api } from "./api";
 import "./ai-hub.css";
 
 const dayNames = ["월", "화", "수", "목", "금", "토", "일"];
-const AI_SCHEDULE_VERSION = 2;
+const AI_SCHEDULE_VERSION = 3;
 const toMinutes = (time) => {
   const [hour, minute] = String(time).slice(0, 5).split(":").map(Number);
   return hour * 60 + minute;
@@ -51,19 +51,68 @@ const writeStore = (key, value) => {
 };
 const createId = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+function occursOnDate(item, targetDate) {
+  const startDate = String(item.schedule_date || "").slice(0, 10);
+  if (!startDate || startDate > targetDate || item.completed) return false;
+  const repeat = item.repeat_type || "none";
+  if (repeat === "none") return startDate === targetDate;
+  const start = new Date(`${startDate}T00:00:00`);
+  const target = new Date(`${targetDate}T00:00:00`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(target.getTime())) return false;
+  if (repeat === "daily") return true;
+  if (repeat === "weekly") return start.getDay() === target.getDay();
+  if (repeat === "monthly") return start.getDate() === target.getDate();
+  return startDate === targetDate;
+}
+
+function personalSchedulesForDate(items, targetDate) {
+  return (Array.isArray(items) ? items : [])
+    .filter((item) => occursOnDate(item, targetDate))
+    .map((item) => ({
+      start: toMinutes(item.start_time),
+      end: toMinutes(item.end_time),
+      title: item.title || "개인 일정",
+      subtitle: [item.category, item.location].filter(Boolean).join(" · ") || "개인 일정",
+      type: "personal",
+      personalScheduleId: item.id,
+    }))
+    .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start)
+    .sort((a, b) => a.start - b.start);
+}
+
+function studyTargetsForDate(items, targetDate) {
+  const target = new Date(`${targetDate}T00:00:00`);
+  const weekLater = new Date(target);
+  weekLater.setDate(weekLater.getDate() + 7);
+  const lastDate = dateKey(weekLater);
+  const unfinished = (Array.isArray(items) ? items : [])
+    .filter((item) => !item.done && item.date)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const imminent = unfinished.filter((item) => item.date <= lastDate);
+  return (imminent.length ? imminent : unfinished.slice(0, 1)).slice(0, 3);
+}
+
 function useSchedulerData() {
   const [rows, setRows] = useState([]);
   const [profile, setProfile] = useState(null);
+  const [personalSchedules, setPersonalSchedules] = useState(() => {
+    const stored = readStore("kmu-personal-schedules");
+    return Array.isArray(stored) ? stored : [];
+  });
   useEffect(() => {
     Promise.all([
       supabase.from("timetables").select("*").order("weekday").order("start_time"),
       supabase.from("profiles").select("*").single(),
-    ]).then(([courses, user]) => {
+      supabase.from("personal_schedules").select("*").order("schedule_date").order("start_time"),
+    ]).then(([courses, user, schedules]) => {
       setRows(courses.data || []);
       setProfile(user.data || null);
+      if (!schedules.error && Array.isArray(schedules.data)) {
+        setPersonalSchedules((current) => schedules.data.length || !current.length ? schedules.data : current);
+      }
     });
   }, []);
-  return { rows, profile };
+  return { rows, profile, personalSchedules };
 }
 
 function appliedDay(date) {
@@ -113,13 +162,79 @@ function chooseLunchSlot(blocks) {
 function withTransitionBuffer(blocks, minutes = 15) {
   return blocks.map((block) => ({
     ...block,
-    start: Math.max(540, block.start - minutes),
-    end: Math.min(1320, block.end + minutes),
+    start: Math.max(0, block.start - minutes),
+    end: Math.min(1440, block.end + minutes),
   }));
 }
 
+const defaultAiPreferences = {
+  homeLocation: "집",
+  toCampusMinutes: 60,
+  fromCampusMinutes: 60,
+  availableStart: "07:00",
+  availableEnd: "22:00",
+};
+
+function commuteBlocks(fixedBlocks, preferences) {
+  if (!fixedBlocks.length) return [];
+  const ordered = [...fixedBlocks].sort((a, b) => a.start - b.start);
+  const first = ordered[0];
+  const last = ordered[ordered.length - 1];
+  const toCampus = Math.max(0, Number(preferences.toCampusMinutes) || 0);
+  const fromCampus = Math.max(0, Number(preferences.fromCampusMinutes) || 0);
+  const dayStart = toMinutes(preferences.availableStart || "07:00");
+  const dayEnd = toMinutes(preferences.availableEnd || "22:00");
+  const blocks = [];
+  if (toCampus > 0) {
+    blocks.push({
+      start: Math.max(dayStart, first.start - toCampus),
+      end: first.start,
+      title: "등교 이동",
+      subtitle: `${preferences.homeLocation || "집"} → 계명대학교 · ${toCampus}분`,
+      type: "commute",
+    });
+  }
+  if (fromCampus > 0) {
+    blocks.push({
+      start: last.end,
+      end: Math.min(dayEnd, last.end + fromCampus),
+      title: "하교 이동",
+      subtitle: `계명대학교 → ${preferences.homeLocation || "집"} · ${fromCampus}분`,
+      type: "commute",
+    });
+  }
+  return blocks.filter((item) => item.end > item.start);
+}
+
+function aiItemsToPlan(items, date) {
+  return (Array.isArray(items) ? items : []).map((item) => ({
+    ...item,
+    start: toMinutes(item.start),
+    end: toMinutes(item.end),
+    planDate: date,
+    scheduleVersion: AI_SCHEDULE_VERSION,
+  })).filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start);
+}
+
+function scheduleContext({ date, classes, personal, commute, studyTargets, tasks, preferences, draftPlan }) {
+  const fixedBlocks = [...classes, ...personal, ...commute].map((item) => ({
+    start: toTime(item.start), end: toTime(item.end), title: item.title, type: item.type,
+  }));
+  return {
+    date,
+    weekday: dayNames[appliedDay(date)],
+    preferences,
+    fixed_blocks: fixedBlocks,
+    study_targets: studyTargets.map((item) => ({ subject: item.subject, section: item.section, deadline: item.date })),
+    tasks: tasks.filter((item) => !item.done).map((item) => ({ title: item.title, duration_minutes: Number(item.duration), priority: item.priority, deadline: item.deadline })),
+    draft_plan: draftPlan.filter((item) => !["class", "personal", "commute"].includes(item.type)).map((item) => ({
+      start: toTime(item.start), end: toTime(item.end), title: item.title, subtitle: item.subtitle, type: item.type,
+    })),
+  };
+}
+
 export function AISchedulePage() {
-  const { rows } = useSchedulerData();
+  const { rows, personalSchedules } = useSchedulerData();
   const today = dateKey(new Date());
   const [date, setDate] = useState(today);
   const [tasks, setTasks] = useState(() => {
@@ -135,13 +250,47 @@ export function AISchedulePage() {
   );
   const [plan, setPlan] = useState(() => scheduleNeedsRefresh ? [] : storedSchedule);
   const [form, setForm] = useState({ title: "", duration: 60, priority: "보통", deadline: today });
+  const [preferences, setPreferences] = useState(() => ({
+    ...defaultAiPreferences,
+    ...readStore("kmu-ai-preferences", {}),
+  }));
+  const [aiBusy, setAiBusy] = useState(false);
   const [message, setMessage] = useState(() => scheduleNeedsRefresh
     ? "이전 방식으로 만든 일정은 전환 시간이 실제 시각에 반영되지 않아 초기화했습니다. AI 일정 만들기를 다시 눌러주세요."
     : "");
   const classes = useMemo(() => classesFor(rows, date), [rows, date]);
+  const personalForDate = useMemo(
+    () => personalSchedulesForDate(personalSchedules, date),
+    [personalSchedules, date],
+  );
+  const commuteForDate = useMemo(
+    () => commuteBlocks(classes, preferences),
+    [classes, preferences],
+  );
+  const studyTargets = useMemo(
+    () => studyTargetsForDate(readStore("kmu-study-plan"), date),
+    [date, plan],
+  );
+  const visiblePlan = useMemo(
+    () => plan.filter((item) => !item.planDate || item.planDate === date),
+    [plan, date],
+  );
   useEffect(() => {
     if (scheduleNeedsRefresh) writeStore("kmu-ai-schedule", []);
   }, [scheduleNeedsRefresh]);
+  useEffect(() => {
+    writeStore("kmu-ai-preferences", preferences);
+  }, [preferences]);
+  useEffect(() => {
+    const updatePlan = (event) => setPlan(Array.isArray(event.detail) ? event.detail : []);
+    const updatePreferences = (event) => setPreferences((current) => ({ ...current, ...(event.detail || {}) }));
+    window.addEventListener("kmu-ai-schedule-updated", updatePlan);
+    window.addEventListener("kmu-ai-preferences-updated", updatePreferences);
+    return () => {
+      window.removeEventListener("kmu-ai-schedule-updated", updatePlan);
+      window.removeEventListener("kmu-ai-preferences-updated", updatePreferences);
+    };
+  }, []);
   const saveTasks = (next) => {
     setTasks(next);
     return writeStore("kmu-ai-tasks", next);
@@ -162,13 +311,26 @@ export function AISchedulePage() {
     setForm({ ...form, title: "" });
     setMessage(saved ? `‘${title}’을(를) 할 일에 추가했습니다.` : "할 일은 추가했지만 브라우저에 저장하지 못했습니다.");
   }
-  function generate() {
+  async function generate() {
     const order = { 높음: 0, 보통: 1, 낮음: 2 };
-    const queue = tasks.filter((task) => !task.done).sort((a, b) =>
+    const taskQueue = tasks.filter((task) => !task.done).sort((a, b) =>
       String(a.deadline || date).localeCompare(String(b.deadline || date)) || (order[a.priority] ?? 1) - (order[b.priority] ?? 1));
-    const occupied = [...classes];
-    const result = classes.map((item) => ({ ...item, planDate: date }));
-    const lunchSlot = chooseLunchSlot(classes);
+    const currentStudyTargets = studyTargetsForDate(readStore("kmu-study-plan"), date);
+    const studyQueue = currentStudyTargets.map((item) => ({
+      id: item.id,
+      title: `${item.subject || "시험"} 공부`,
+      duration: Math.max(30, Math.min(90, Number(item.end) - Number(item.start) || 60)),
+      priority: item.date <= date ? "높음" : "보통",
+      deadline: item.date,
+      source: "study",
+      section: item.section,
+    }));
+    const queue = [...studyQueue, ...taskQueue].sort((a, b) =>
+      String(a.deadline || date).localeCompare(String(b.deadline || date)) || (order[a.priority] ?? 1) - (order[b.priority] ?? 1));
+    const fixedItems = [...classes, ...personalForDate, ...commuteForDate];
+    const occupied = [...fixedItems];
+    const result = fixedItems.map((item) => ({ ...item, planDate: date }));
+    const lunchSlot = chooseLunchSlot(occupied);
     if (lunchSlot) {
       const lunch = {
         ...lunchSlot,
@@ -183,20 +345,68 @@ export function AISchedulePage() {
     let scheduledCount = 0;
     for (const task of queue) {
       const duration = Math.max(15, Number(task.duration) || 60);
-      const slot = freeSlots(withTransitionBuffer(occupied)).find((item) => item.end - item.start >= duration);
+      const slot = freeSlots(
+        withTransitionBuffer(occupied),
+        toMinutes(preferences.availableStart || "07:00"),
+        toMinutes(preferences.availableEnd || "22:00"),
+      ).find((item) => item.end - item.start >= duration);
       if (!slot) continue;
-      const item = { start: slot.start, end: slot.start + duration, title: task.title || "할 일", subtitle: `${task.priority || "보통"} 우선순위 · ${task.deadline || date} 마감`, type: "task", taskId: task.id, planDate: date, scheduleVersion: AI_SCHEDULE_VERSION };
+      const isStudy = task.source === "study";
+      const item = {
+        start: slot.start,
+        end: slot.start + duration,
+        title: task.title || "할 일",
+        subtitle: isStudy
+          ? `${task.section || "시험 범위 학습"} · ${task.deadline || date}까지 완료`
+          : `${task.priority || "보통"} 우선순위 · ${task.deadline || date} 마감`,
+        type: isStudy ? "study" : "task",
+        taskId: isStudy ? undefined : task.id,
+        studyPlanId: isStudy ? task.id : undefined,
+        planDate: date,
+        scheduleVersion: AI_SCHEDULE_VERSION,
+      };
       result.push(item); occupied.push(item);
       scheduledCount += 1;
     }
     const next = result.sort((a, b) => a.start - b.start);
     setPlan(next);
-    const saved = writeStore("kmu-ai-schedule", next);
+    let saved = writeStore("kmu-ai-schedule", next);
     const lunchNote = lunchSlot ? "" : " 12:00~14:00에 40분 이상 빈 시간이 없어 점심은 자동 배치하지 못했습니다.";
-    if (!queue.length) setMessage(`완료되지 않은 할 일이 없어 수업과 휴식 시간만 반영했습니다.${lunchNote}`);
-    else if (!scheduledCount) setMessage(`입력한 소요 시간을 넣을 빈 시간이 없습니다. 시간이나 날짜를 조정해주세요.${lunchNote}`);
-    else setMessage(`${queue.length}개 중 ${scheduledCount}개의 할 일을 추천 일정에 배치했습니다.${lunchNote}${saved ? "" : " (브라우저 저장 실패)"}`);
+    const fixedNote = personalForDate.length ? ` 개인 일정 ${personalForDate.length}건을 고정 시간으로 반영했습니다.` : "";
+    const studyNote = studyQueue.length ? ` 공부 목표 ${studyQueue.length}건을 함께 검토했습니다.` : "";
+    const fallbackMessage = !queue.length
+      ? `완료되지 않은 할 일이나 가까운 공부 목표가 없어 수업·개인 일정·이동·휴식만 반영했습니다.${fixedNote}${lunchNote}`
+      : !scheduledCount
+        ? `입력한 소요 시간을 넣을 빈 시간이 없습니다. 시간이나 날짜를 조정해주세요.${lunchNote}`
+        : `${queue.length}개 중 ${scheduledCount}개의 할 일과 공부 목표를 추천 일정에 배치했습니다.${fixedNote}${studyNote}${lunchNote}${saved ? "" : " (브라우저 저장 실패)"}`;
+    setMessage(`${fallbackMessage} AI가 세부 조건을 검토하고 있습니다.`);
+    setAiBusy(true);
+    try {
+      const context = scheduleContext({
+        date, classes, personal: personalForDate, commute: commuteForDate,
+        studyTargets: currentStudyTargets, tasks, preferences, draftPlan: next,
+      });
+      const response = await api("/ai/schedule/refine", {
+        method: "POST",
+        body: JSON.stringify({ context }),
+      });
+      const aiItems = aiItemsToPlan(response.items, date);
+      if (response.available && aiItems.length) {
+        const refined = [...fixedItems.map((item) => ({ ...item, planDate: date })), ...aiItems]
+          .sort((a, b) => a.start - b.start);
+        setPlan(refined);
+        saved = writeStore("kmu-ai-schedule", refined);
+        setMessage(`${response.message}${saved ? "" : " 브라우저 저장에는 실패했습니다."}`);
+      } else {
+        setMessage(`${fallbackMessage} ${response.message || "규칙 기반 추천을 사용했습니다."}`);
+      }
+    } catch {
+      setMessage(`${fallbackMessage} AI 서버에 연결하지 못해 규칙 기반 추천을 유지했습니다.`);
+    } finally {
+      setAiBusy(false);
+    }
   }
+
   return <AIFrame title="AI 일정 추천" description="수업과 마감일을 분석해 오늘 가능한 시간에 할 일을 자동 배치합니다." icon={Brain}>
     <div className="ai-two-column">
       <section className="ai-panel"><header><div><h2>추천 조건</h2><p>소요 시간과 마감일을 고려하고 일정 사이에 15분의 전환 시간을 확보합니다.</p></div><input type="date" value={date} onChange={(e) => setDate(e.target.value)} aria-label="일정 추천 날짜" /></header>
@@ -207,12 +417,22 @@ export function AISchedulePage() {
           <label className="task-deadline-field"><span>마감일</span><input type="date" value={form.deadline} onChange={(e) => setForm({ ...form, deadline: e.target.value })} /></label>
           <button type="submit"><Plus />할 일 추가</button>
         </form>
+        <section className="commute-settings">
+          <header><Route /><div><b>등하교 및 활동 가능 시간</b><small>첫 일정 전 등교와 마지막 일정 후 하교 시간을 자동 확보합니다.</small></div></header>
+          <div>
+            <label><span>출발 장소</span><input value={preferences.homeLocation} onChange={(e) => setPreferences({ ...preferences, homeLocation: e.target.value })} placeholder="예: 집, 동대구역" /></label>
+            <label><span>등교 <small>(분)</small></span><input type="number" min="0" step="5" value={preferences.toCampusMinutes} onChange={(e) => setPreferences({ ...preferences, toCampusMinutes: e.target.value })} /></label>
+            <label><span>하교 <small>(분)</small></span><input type="number" min="0" step="5" value={preferences.fromCampusMinutes} onChange={(e) => setPreferences({ ...preferences, fromCampusMinutes: e.target.value })} /></label>
+            <label><span>하루 시작</span><input type="time" value={preferences.availableStart} onChange={(e) => setPreferences({ ...preferences, availableStart: e.target.value })} /></label>
+            <label><span>하루 종료</span><input type="time" value={preferences.availableEnd} onChange={(e) => setPreferences({ ...preferences, availableEnd: e.target.value })} /></label>
+          </div>
+        </section>
         {message && <p className="ai-form-message" role="status">{message}</p>}
         <div className="task-list">{tasks.map((task) => <article key={task.id} className={task.done ? "done" : ""}><button onClick={() => saveTasks(tasks.map((item) => item.id === task.id ? { ...item, done: !item.done } : item))}><Check /></button><div><b>{task.title}</b><small>예상 {task.duration}분 · {task.deadline} 마감 · 우선순위 {task.priority}</small></div><button onClick={() => saveTasks(tasks.filter((item) => item.id !== task.id))}><Trash2 /></button></article>)}</div>
-        <button type="button" className="ai-primary" onClick={generate}><Sparkles />AI 일정 만들기</button>
+        <button type="button" className="ai-primary" onClick={generate} disabled={aiBusy}><Sparkles />{aiBusy ? "AI가 일정 검토 중..." : "AI 일정 만들기"}</button>
       </section>
-      <section className="ai-panel ai-result"><header><div><h2>{date} 추천 일정</h2><p>{dayNames[appliedDay(date)]}요일 시간표 기준 · 수업 {classes.length}개</p></div></header>
-        {plan.length ? <div className="timeline">{plan.map((item, index) => <article className={item.type} key={`${item.start}-${index}`}><time>{toTime(item.start)}<span>{toTime(item.end)}</span></time><i></i><div><b>{item.title}</b><small>{cleanScheduleSubtitle(item.subtitle)}</small></div></article>)}</div> : <Empty text="할 일을 추가한 뒤 AI 일정 만들기를 눌러주세요." />}
+      <section className="ai-panel ai-result"><header><div><h2>{date} 추천 일정</h2><p>{dayNames[appliedDay(date)]}요일 · 수업 {classes.length}개 · 개인 일정 {personalForDate.length}개 · 이동 {commuteForDate.length}개 · 가까운 공부 목표 {studyTargets.length}개</p></div></header>
+        {visiblePlan.length ? <div className="timeline">{visiblePlan.map((item, index) => <article className={item.type} key={`${item.start}-${index}`}><time>{toTime(item.start)}<span>{toTime(item.end)}</span></time><i></i><div><b>{item.title}</b><small>{cleanScheduleSubtitle(item.subtitle)}</small></div></article>)}</div> : <Empty text="할 일·개인 일정·공부 계획을 확인한 뒤 AI 일정 만들기를 눌러주세요." />}
       </section>
     </div>
   </AIFrame>;
@@ -347,15 +567,6 @@ export const schoolEvents = [
   { id: 5, category: "비교과", title: "학습전략 워크숍", date: "2026-08-31", place: "동산도서관", tags: ["전체", "학습"], description: "시간관리와 시험 대비 학습전략을 실습하는 비교과 프로그램" },
   { id: 6, category: "특강", title: "글로벌 리더십 초청 특강", date: "2026-11-05", place: "의양관 운제실", tags: ["전체", "진로"], description: "글로벌 산업 변화와 대학생 진로 설계 강연" },
 ];
-export function EventRecommendPage() {
-  const { profile } = useSchedulerData(); const [filter, setFilter] = useState("전체"); const [favorites, setFavorites] = useState(() => readStore("kmu-event-favorites"));
-  const recommended = schoolEvents.map((event) => ({ ...event, score: event.tags.some((tag) => profile?.department?.includes(tag) || tag === "전체") ? 95 : 78 })).filter((event) => filter === "전체" || event.category === filter).sort((a, b) => b.score - a.score);
-  function favorite(id) { const next = favorites.includes(id) ? favorites.filter((item) => item !== id) : [...favorites, id]; setFavorites(next); writeStore("kmu-event-favorites", next); }
-  return <AIFrame title="행사 추천" description="학과와 관심 분야에 맞는 축제·특강·취업·공모전·비교과 행사를 추천합니다." icon={Sparkles}>
-    <section className="ai-panel"><header><div><h2>{profile?.department || "계명대학교"} 맞춤 행사</h2><p>추천 이유와 장소, 날짜를 확인하고 관심 행사로 저장하세요.</p></div><div className="event-filters">{["전체", "축제", "SW", "취업", "공모전", "비교과", "특강"].map((item) => <button className={filter === item ? "active" : ""} onClick={() => setFilter(item)} key={item}>{item}</button>)}</div></header><div className="event-grid">{recommended.map((event) => <article key={event.id}><div className="event-top"><span>{event.category}</span><button className={favorites.includes(event.id) ? "saved" : ""} onClick={() => favorite(event.id)}><Star /></button></div><h3>{event.title}</h3><p>{event.description}</p><div className="event-meta"><span><CalendarCheck />{event.date}</span><span><MapPin />{event.place}</span></div><footer><div>{event.tags.map((tag) => <i key={tag}>#{tag}</i>)}</div><b>{event.score}% 추천</b></footer></article>)}</div></section>
-  </AIFrame>;
-}
-
 function AIFrame({ title, description, icon: Icon, children }) {
   return <div className="ai-feature-page"><section className="ai-hero"><span><Icon /></span><div><p>KMU SMART AI</p><h1>{title}</h1><small>{description}</small></div></section>{children}</div>;
 }

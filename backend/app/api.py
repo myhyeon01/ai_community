@@ -140,8 +140,10 @@ async def sync_story_events(pages:int=Query(1,ge=1,le=5),limit:int=Query(80,ge=1
     return {"fetched":len(events),**result}
 
 @router.get("/events/recommendations",response_model=list[schemas.SchoolEventOut],tags=["Events"])
-def event_recommendations(interests:str="",limit:int=Query(12,ge=1,le=50),user=Depends(current_user),db:Session=Depends(get_db)):
-    return SchoolEventRepository(db).recommendations(user,interests,limit)
+async def event_recommendations(interests:str="",department:str="",grade:int|None=Query(None,ge=1,le=6),limit:int=Query(12,ge=1,le=50),user=Depends(current_user),db:Session=Depends(get_db)):
+    candidate_limit=min(50,max(24,limit*3))
+    candidates=SchoolEventRepository(db).recommendations(user,interests,candidate_limit,department,grade)
+    return await asyncio.to_thread(AIService().rerank_events,user,candidates,interests,limit)
 
 @router.get("/events/favorites",response_model=list[schemas.SchoolEventOut],tags=["Events"])
 def event_favorites(user=Depends(current_user),db:Session=Depends(get_db)):
@@ -160,3 +162,11 @@ def delete_event_favorite(event_id:int,user=Depends(current_user),db:Session=Dep
 @router.get("/ai/today",tags=["AI"])
 def ai_today(target:date|None=None,user=Depends(current_user),db:Session=Depends(get_db)):
     view=CalendarService(CalendarRepository(db),CourseRepository(db)).today(user.id,target or date.today());return AIService().recommend(user,view)
+
+@router.post("/ai/schedule/refine",tags=["AI"])
+async def refine_ai_schedule(data:schemas.AIScheduleRequest,user=Depends(current_user)):
+    return await asyncio.to_thread(AIService().refine_schedule,data.context)
+
+@router.post("/ai/schedule/chat",tags=["AI"])
+async def chat_ai_schedule(data:schemas.AIScheduleChatRequest,user=Depends(current_user)):
+    return await asyncio.to_thread(AIService().chat_schedule,data.message,data.context,data.history)
