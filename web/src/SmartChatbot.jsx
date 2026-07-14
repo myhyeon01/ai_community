@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Bot, ChevronRight, Send, Sparkles, X } from "lucide-react";
 import { api } from "./api";
 import { loadUserState, readLocalState, saveUserState, saveUserStateLater } from "./appState";
+import { saveRecommendedSchedule } from "./aiScheduleStore";
 import "./smart-chatbot.css";
 
 const HISTORY_KEY = "kmu-assistant-history";
@@ -62,7 +63,6 @@ function updatedCommuteBlocks(classes, preferences, planDate) {
   const first = ordered[0];
   const last = ordered[ordered.length - 1];
   const startLimit = toMinutes(preferences.availableStart || "07:00");
-  const endLimit = toMinutes(preferences.availableEnd || "22:00");
   const toCampus = Math.max(0, Number(preferences.toCampusMinutes) || 0);
   const fromCampus = Math.max(0, Number(preferences.fromCampusMinutes) || 0);
   const result = [];
@@ -70,8 +70,8 @@ function updatedCommuteBlocks(classes, preferences, planDate) {
     start: Math.max(startLimit, first.start - toCampus), end: first.start,
     title: "등교 이동", subtitle: `${preferences.homeLocation || "집"} → 계명대학교 · ${toCampus}분`, type: "commute", planDate,
   });
-  if (fromCampus > 0 && last.end < endLimit) result.push({
-    start: last.end, end: Math.min(endLimit, last.end + fromCampus),
+  if (fromCampus > 0 && last.end < 1440) result.push({
+    start: last.end, end: Math.min(1440, last.end + fromCampus),
     title: "하교 이동", subtitle: `계명대학교 → ${preferences.homeLocation || "집"} · ${fromCampus}분`, type: "commute", planDate,
   });
   return result.filter((item) => item.end > item.start);
@@ -82,17 +82,19 @@ function applyScheduleResponse(response) {
   const storedSchedule = readStore("kmu-ai-schedule", []);
   const current = Array.isArray(storedSchedule) ? storedSchedule : [];
   const planDate = current.find((item) => item.planDate)?.planDate || new Date().toISOString().slice(0, 10);
+  const currentForDate = current.filter((item) => !item.planDate || item.planDate === planDate);
+  const otherDates = current.filter((item) => item.planDate && item.planDate !== planDate);
   let nextPreferences = readStore("kmu-ai-preferences", {});
   if (Object.keys(updates).length) {
     nextPreferences = { ...nextPreferences, ...updates };
     saveUserStateLater("kmu-ai-preferences", nextPreferences);
     window.dispatchEvent(new CustomEvent("kmu-ai-preferences-updated", { detail: nextPreferences }));
   }
-  const classes = current.filter((item) => item.type === "class");
-  const personal = current.filter((item) => item.type === "personal");
+  const classes = currentForDate.filter((item) => item.type === "class");
+  const personal = currentForDate.filter((item) => item.type === "personal");
   const commute = Object.keys(updates).length
     ? updatedCommuteBlocks(classes, nextPreferences, planDate)
-    : current.filter((item) => item.type === "commute");
+    : currentForDate.filter((item) => item.type === "commute");
   const fixed = [...classes, ...personal, ...commute];
   const responseItems = Array.isArray(response.items) ? response.items : [];
   const flexible = responseItems.length ? responseItems.map((item) => ({
@@ -102,10 +104,19 @@ function applyScheduleResponse(response) {
     planDate,
     scheduleVersion: 3,
   })).filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start)
-    : current.filter((item) => !["class", "personal", "commute"].includes(item.type));
+    : currentForDate.filter((item) => !["class", "personal", "commute"].includes(item.type));
   if (!responseItems.length && !Object.keys(updates).length) return;
-  const next = [...fixed, ...flexible].sort((a, b) => a.start - b.start);
+  const nextForDate = [...fixed, ...flexible].sort((a, b) => a.start - b.start);
+  const next = [...otherDates, ...nextForDate];
   saveUserStateLater("kmu-ai-schedule", next);
+  saveRecommendedSchedule({
+    planDate,
+    items: nextForDate,
+    source: "chatbot",
+    message: response.reply || "챗봇이 추천 일정을 조정했습니다.",
+    context: { preference_updates: updates },
+    scheduleVersion: 3,
+  });
   window.dispatchEvent(new CustomEvent("kmu-ai-schedule-updated", { detail: next }));
 }
 

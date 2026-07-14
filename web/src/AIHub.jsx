@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { supabase } from "./supabase";
 import { loadUserState, readLocalState, saveUserStateLater, writeLocalState } from "./appState";
+import { loadRecommendedSchedule, saveRecommendedSchedule } from "./aiScheduleStore";
 import { academicFallback2026 } from "./academicData";
 import { api } from "./api";
 import "./ai-hub.css";
@@ -180,7 +181,6 @@ function commuteBlocks(fixedBlocks, preferences) {
   const toCampus = Math.max(0, Number(preferences.toCampusMinutes) || 0);
   const fromCampus = Math.max(0, Number(preferences.fromCampusMinutes) || 0);
   const dayStart = toMinutes(preferences.availableStart || "07:00");
-  const dayEnd = toMinutes(preferences.availableEnd || "22:00");
   const blocks = [];
   if (toCampus > 0) {
     blocks.push({
@@ -194,7 +194,9 @@ function commuteBlocks(fixedBlocks, preferences) {
   if (fromCampus > 0) {
     blocks.push({
       start: last.end,
-      end: Math.min(dayEnd, last.end + fromCampus),
+      // 활동 가능 종료 시각은 할 일 배치 범위일 뿐, 필수 하교 이동을
+      // 없애는 기준이 아니다. 야간 수업 뒤에도 자정까지 하교를 표시한다.
+      end: Math.min(1440, last.end + fromCampus),
       title: "하교 이동",
       subtitle: `계명대학교 → ${preferences.homeLocation || "집"} · ${fromCampus}분`,
       type: "commute",
@@ -211,6 +213,117 @@ function aiItemsToPlan(items, date) {
     planDate: date,
     scheduleVersion: AI_SCHEDULE_VERSION,
   })).filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start);
+}
+
+const fixedScheduleTypes = new Set(["class", "personal", "commute"]);
+const flexibleScheduleTypes = new Set(["task", "study", "rest"]);
+
+function normalizedScheduleTitle(value) {
+  return String(value || "").toLocaleLowerCase("ko").replace(/\s+/g, "").replace(/[^0-9a-z가-힣]/gi, "");
+}
+
+function schedulesOverlap(left, right) {
+  return left.start < right.end && left.end > right.start;
+}
+
+function repeatsFixedSchedule(item, fixedItems) {
+  const title = normalizedScheduleTitle(item.title);
+  const description = `${item.title || ""} ${item.subtitle || ""}`;
+  if (!title) return true;
+  return fixedItems.some((fixed) => {
+    const fixedTitle = normalizedScheduleTitle(fixed.title);
+    if (!fixedTitle) return false;
+    if (title === fixedTitle) return true;
+    return (title.includes(fixedTitle) || fixedTitle.includes(title))
+      && /수업|강의|개인\s*일정|이동|등교|하교/.test(description);
+  });
+}
+
+function mergeFixedConflicts(items) {
+  const groups = [];
+  items.sort((a, b) => a.start - b.start || a.end - b.end).forEach((item) => {
+    const current = groups.at(-1);
+    if (current && current.start < item.end && current.end > item.start) {
+      current.start = Math.min(current.start, item.start);
+      current.end = Math.max(current.end, item.end);
+      current.items.push(item);
+      return;
+    }
+    groups.push({ start: item.start, end: item.end, items: [item] });
+  });
+  return groups.map((group) => {
+    if (group.items.length === 1) return group.items[0];
+    return {
+      start: group.start,
+      end: group.end,
+      title: "일정 충돌 확인",
+      subtitle: group.items.map((item) => `${item.title} ${toTime(item.start)}~${toTime(item.end)}`).join(" · "),
+      type: "conflict",
+      planDate: group.items[0].planDate,
+      scheduleVersion: AI_SCHEDULE_VERSION,
+    };
+  });
+}
+
+function cleanPlanForDisplay(items) {
+  const fixed = items.filter((item) => fixedScheduleTypes.has(item.type))
+    .filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end) && item.end > item.start);
+  const accepted = [];
+  const occupied = [...fixed];
+  const titles = new Set();
+  items.filter((item) => flexibleScheduleTypes.has(item.type))
+    .sort((a, b) => a.start - b.start)
+    .forEach((item) => {
+      if (!Number.isFinite(item.start) || !Number.isFinite(item.end) || item.end <= item.start) return;
+      const title = normalizedScheduleTitle(item.title);
+      if (!title || titles.has(title) || repeatsFixedSchedule(item, fixed)) return;
+      if (withTransitionBuffer(occupied).some((block) => schedulesOverlap(item, block))) return;
+      titles.add(title);
+      accepted.push(item);
+      occupied.push(item);
+    });
+  return [...mergeFixedConflicts(fixed), ...accepted].sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+function planSignature(items) {
+  return (Array.isArray(items) ? items : [])
+    .map((item) => `${item.type}|${normalizedScheduleTitle(item.title)}|${item.start}|${item.end}`)
+    .sort()
+    .join("\n");
+}
+
+function sanitizeAiPlan(aiItems, protectedItems, preferences, date) {
+  const dayStart = toMinutes(preferences.availableStart || "07:00");
+  const dayEnd = toMinutes(preferences.availableEnd || "22:00");
+  const fixed = protectedItems.map((item) => ({ ...item, planDate: date }));
+  const occupied = [...fixed];
+  const accepted = [];
+  const titles = new Set();
+
+  aiItems.filter((item) => flexibleScheduleTypes.has(item.type))
+    .sort((a, b) => a.start - b.start)
+    .forEach((item) => {
+      const title = normalizedScheduleTitle(item.title);
+      if (!title || titles.has(title) || repeatsFixedSchedule(item, fixed)) return;
+      const duration = Math.max(15, Math.min(180, item.end - item.start));
+      if (!Number.isFinite(duration)) return;
+      let candidate = { ...item, end: item.start + duration, planDate: date, scheduleVersion: AI_SCHEDULE_VERSION };
+      const buffered = withTransitionBuffer(occupied);
+      const fits = candidate.start >= dayStart && candidate.end <= dayEnd
+        && !buffered.some((block) => schedulesOverlap(candidate, block));
+      if (!fits) {
+        const slots = freeSlots(buffered, dayStart, dayEnd)
+          .filter((slot) => slot.end - slot.start >= duration);
+        const slot = slots.find((value) => value.start >= Math.max(dayStart, candidate.start)) || slots[0];
+        if (!slot) return;
+        candidate = { ...candidate, start: slot.start, end: slot.start + duration };
+      }
+      titles.add(title);
+      accepted.push(candidate);
+      occupied.push(candidate);
+    });
+
+  return [...fixed, ...accepted].sort((a, b) => a.start - b.start || a.end - b.end);
 }
 
 function scheduleContext({ date, classes, personal, commute, studyTargets, tasks, preferences, draftPlan }) {
@@ -252,6 +365,7 @@ export function AISchedulePage() {
     ...readStore("kmu-ai-preferences", {}),
   }));
   const [aiBusy, setAiBusy] = useState(false);
+  const [stateReady, setStateReady] = useState(false);
   const [message, setMessage] = useState(() => scheduleNeedsRefresh
     ? "이전 방식으로 만든 일정은 전환 시간이 실제 시각에 반영되지 않아 초기화했습니다. AI 일정 만들기를 다시 눌러주세요."
     : "");
@@ -273,15 +387,35 @@ export function AISchedulePage() {
       if (nextPreferences && typeof nextPreferences === "object" && !Array.isArray(nextPreferences)) {
         setPreferences((current) => ({ ...current, ...nextPreferences }));
       }
+      setStateReady(true);
     });
     return () => { active = false; };
   }, []);
+  useEffect(() => {
+    if (!stateReady) return undefined;
+    let active = true;
+    loadRecommendedSchedule(date).then((savedSchedule) => {
+      if (!active || !Array.isArray(savedSchedule?.items)) return;
+      const cloudItems = savedSchedule.items.map((item) => ({ ...item, planDate: item.planDate || date }));
+      setPlan((current) => {
+        const next = [
+          ...current.filter((item) => item.planDate && item.planDate !== date),
+          ...cloudItems,
+        ].sort((a, b) => String(a.planDate || "").localeCompare(String(b.planDate || "")) || a.start - b.start);
+        writeStore("kmu-ai-schedule", next);
+        return next;
+      });
+    });
+    return () => { active = false; };
+  }, [date, stateReady]);
   const classes = useMemo(() => classesFor(rows, date), [rows, date]);
   const personalForDate = useMemo(
     () => personalSchedulesForDate(personalSchedules, date),
     [personalSchedules, date],
   );
   const commuteForDate = useMemo(
+    // 등하교는 개인 일정이 아니라 그날 시간표의 첫/마지막 수업을 기준으로 한다.
+    // 따라서 하교 이동은 마지막 수업 종료 시각에 바로 시작한다.
     () => commuteBlocks(classes, preferences),
     [classes, preferences],
   );
@@ -290,9 +424,32 @@ export function AISchedulePage() {
     [date, plan],
   );
   const visiblePlan = useMemo(
-    () => plan.filter((item) => !item.planDate || item.planDate === date),
-    [plan, date],
+    () => cleanPlanForDisplay([
+      ...classes.map((item) => ({ ...item, planDate: date })),
+      ...personalForDate.map((item) => ({ ...item, planDate: date })),
+      ...commuteForDate.map((item) => ({ ...item, planDate: date })),
+      ...plan.filter((item) => (!item.planDate || item.planDate === date) && !fixedScheduleTypes.has(item.type)),
+    ]),
+    [classes, commuteForDate, date, personalForDate, plan],
   );
+  useEffect(() => {
+    if (!stateReady) return;
+    const currentForDate = plan.filter((item) => !item.planDate || item.planDate === date);
+    if (planSignature(currentForDate) === planSignature(visiblePlan)) return;
+    const next = [
+      ...plan.filter((item) => item.planDate && item.planDate !== date),
+      ...visiblePlan.map((item) => ({ ...item, planDate: date })),
+    ];
+    setPlan(next);
+    writeStore("kmu-ai-schedule", next);
+    saveRecommendedSchedule({
+      planDate: date,
+      items: visiblePlan.map((item) => ({ ...item, planDate: date })),
+      source: "normalized",
+      message: "중복 일정과 시간 충돌을 정리했습니다.",
+      scheduleVersion: AI_SCHEDULE_VERSION,
+    });
+  }, [date, plan, stateReady, visiblePlan]);
   useEffect(() => {
     if (scheduleNeedsRefresh) writeStore("kmu-ai-schedule", []);
   }, [scheduleNeedsRefresh]);
@@ -397,29 +554,55 @@ export function AISchedulePage() {
       : !scheduledCount
         ? `입력한 소요 시간을 넣을 빈 시간이 없습니다. 시간이나 날짜를 조정해주세요.${lunchNote}`
         : `${queue.length}개 중 ${scheduledCount}개의 할 일과 공부 목표를 추천 일정에 배치했습니다.${fixedNote}${studyNote}${lunchNote}${saved ? "" : " (브라우저 저장 실패)"}`;
-    setMessage(`${fallbackMessage} AI가 세부 조건을 검토하고 있습니다.`);
+    const context = scheduleContext({
+      date, classes, personal: personalForDate, commute: commuteForDate,
+      studyTargets: currentStudyTargets, tasks, preferences, draftPlan: next,
+    });
+    const cloudSaved = await saveRecommendedSchedule({
+      planDate: date,
+      items: next,
+      source: "rules",
+      message: fallbackMessage,
+      context,
+      scheduleVersion: AI_SCHEDULE_VERSION,
+    });
+    const syncNote = cloudSaved ? "" : " 다른 기기 동기화에는 실패했습니다.";
+    setMessage(`${fallbackMessage}${syncNote} AI가 세부 조건을 검토하고 있습니다.`);
     setAiBusy(true);
     try {
-      const context = scheduleContext({
-        date, classes, personal: personalForDate, commute: commuteForDate,
-        studyTargets: currentStudyTargets, tasks, preferences, draftPlan: next,
-      });
       const response = await api("/ai/schedule/refine", {
         method: "POST",
         body: JSON.stringify({ context }),
       });
       const aiItems = aiItemsToPlan(response.items, date);
       if (response.available && aiItems.length) {
-        const refined = [...fixedItems.map((item) => ({ ...item, planDate: date })), ...aiItems]
-          .sort((a, b) => a.start - b.start);
+        const protectedItems = [
+          ...fixedItems,
+          ...next.filter((item) => item.type === "rest" && /점심|식사/.test(item.title || "")),
+        ];
+        const fallbackFlexible = next.filter((item) => item.type === "task" || item.type === "study");
+        const refined = sanitizeAiPlan(
+          [...aiItems, ...fallbackFlexible],
+          protectedItems,
+          preferences,
+          date,
+        );
         setPlan(refined);
         saved = writeStore("kmu-ai-schedule", refined);
-        setMessage(`${response.message}${saved ? "" : " 브라우저 저장에는 실패했습니다."}`);
+        const refinedCloudSaved = await saveRecommendedSchedule({
+          planDate: date,
+          items: refined,
+          source: "openai",
+          message: response.message || "",
+          context,
+          scheduleVersion: AI_SCHEDULE_VERSION,
+        });
+        setMessage(`${response.message}${saved ? "" : " 브라우저 저장에는 실패했습니다."}${refinedCloudSaved ? "" : " 다른 기기 동기화에는 실패했습니다."}`);
       } else {
-        setMessage(`${fallbackMessage} ${response.message || "규칙 기반 추천을 사용했습니다."}`);
+        setMessage(`${fallbackMessage}${syncNote} ${response.message || "규칙 기반 추천을 사용했습니다."}`);
       }
     } catch {
-      setMessage(`${fallbackMessage} AI 서버에 연결하지 못해 규칙 기반 추천을 유지했습니다.`);
+      setMessage(`${fallbackMessage}${syncNote} AI 서버에 연결하지 못해 규칙 기반 추천을 유지했습니다.`);
     } finally {
       setAiBusy(false);
     }

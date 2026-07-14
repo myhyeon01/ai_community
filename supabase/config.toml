@@ -1,0 +1,3 @@
+[functions.kmu-api]
+verify_jwt = false
+

@@ -220,6 +220,19 @@
   background: #f4fbff;
 }
 
+.timeline .conflict i {
+  background: #dc4c64;
+}
+
+.timeline .conflict > div {
+  border-color: #f0b9c3;
+  background: #fff5f7;
+}
+
+.timeline .conflict b {
+  color: #a3263c;
+}
+
 .ai-primary:disabled {
   cursor: wait;
   opacity: .65;

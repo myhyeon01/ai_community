@@ -1,53 +1,24 @@
 # Supabase 연결 설정
 
-## 1. 테이블 생성
+## 테이블과 RLS
 
-Supabase Dashboard의 **SQL Editor → New query**에서 아래 파일을 순서대로 열어 전체를 붙여넣고 각각 **Run**을 누른다.
+`supabase/migrations`의 SQL을 파일명 순서대로 적용한다. Supabase CLI를 사용하면 `npm exec --yes supabase@latest -- db push` 한 번으로 적용된다.
 
-1. `supabase/migrations/202607130001_profiles_and_timetables.sql`
-2. `supabase/migrations/202607130002_personal_schedules.sql`
-3. `supabase/migrations/202607130003_timetable_semesters.sql`
-4. `supabase/migrations/202607130004_timetable_collections.sql`
-5. `supabase/migrations/202607130005_user_app_state.sql`
+주요 테이블은 `profiles`, `timetables`, `personal_schedules`, `timetable_collections`, `user_app_state`, `school_events`, `school_event_favorites`, `kmu_edge_cache`다. 사용자 데이터는 RLS로 본인 행만 접근한다.
 
-생성되는 항목:
+## 학번 로그인
 
-- `profiles`: 이름, 학번, 학과, 학년
-- `timetables`: 사용자별 수업 시간표
-- `personal_schedules`: 사용자 개인 일정
-- `timetable_collections`: 학년도·학기별 시간표 묶음
-- `user_app_state`: 관심 분야, 공지 즐겨찾기, AI 일정·공부계획, 알림 설정, 챗봇 기록 등 사용자별 앱 상태
-- 회원가입 프로필 자동 생성 트리거
-- 사용자가 본인 행에만 접근하는 RLS 정책
+Authentication → Providers → Email을 활성화한다. 앱은 학번을 `${학번}@kmu.local` 내부 식별자로 변환한다. 개발 중 실제 이메일 확인을 사용하지 않으면 Confirm email을 끈다.
 
-## 2. 학번 로그인 설정
+## React 환경변수
 
-Dashboard의 **Authentication → Providers → Email**에서 Email provider를 활성화한다.
-실제 이메일을 받지 않는 학번 로그인 방식이므로 개발 단계에서는 **Confirm email**을 끈다.
-
-앱 내부에서는 `5764124`라는 학번을 `5764124@kmu.local`이라는 Auth 식별자로 변환한다.
-사용자 화면이나 `profiles`에는 내부 이메일을 표시하지 않는다.
-
-> 실제 이메일이 없으므로 이메일 기반 비밀번호 찾기는 사용할 수 없다. 추후 관리자 재설정 또는 학교 이메일 추가가 필요하다.
-
-## 3. React 환경변수
-
-`web/.env.example`을 `web/.env`로 복사하고 Supabase Dashboard의 **Project Settings → API** 값을 입력한다.
+`web/.env.example`을 `web/.env`로 복사한다.
 
 ```env
-VITE_API_URL=http://localhost:8000/api/v1
 VITE_SUPABASE_URL=https://프로젝트참조.supabase.co
 VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_...
 ```
 
-브라우저에 넣어도 되는 것은 publishable(또는 기존 anon) 키뿐이다. `service_role` 또는 secret 키는 절대 `VITE_` 환경변수에 넣지 않는다.
+`VITE_API_URL`은 필요하지 않다. `service_role`, OpenAI 키, Story+ 쿠키를 `VITE_` 변수로 넣으면 안 된다.
 
-## 4. 실행
-
-```powershell
-cd C:\Users\plask\Desktop\TimeTable\web
-npm install
-npm run dev
-```
-
-`http://localhost:5173`에서 회원가입 후 Supabase의 Authentication → Users와 Table Editor → profiles에서 생성 결과를 확인한다.
+Edge Function 배포와 비밀값 설정은 `SUPABASE_EDGE_MIGRATION.md`를 따른다.

@@ -34,7 +34,7 @@ export default function TodayPage() {
           : Promise.resolve({ data: [], error: null }),
       ])
       const academicError = calendarResult.error ? "학사일정 정보를 불러오지 못했습니다." : ""
-      if (calendarResult.error) console.error("오늘 수업 학사일정 요청 실패", { error: calendarResult.error, academicUrl: "http://localhost:8000/api/v1/academic-calendar" })
+      if (calendarResult.error) console.error("오늘 수업 학사일정 요청 실패", { error: calendarResult.error, academicApi: "Supabase Edge Function /academic-calendar" })
       if (timetable.error) {
         console.error("오늘 수업 시간표 요청 실패", { error: timetable.error, timetableTable: "timetables" })
         setData({ timetable: [], schedules: calendarResult.calendar?.schedules || [], loading: false, error: "수업 정보를 불러오지 못했습니다.", academicError })
@@ -49,7 +49,7 @@ export default function TodayPage() {
       })).filter((row) => Number.isInteger(row.weekday) && row.weekday >= 0 && row.weekday <= 6 && /^\d{2}:\d{2}$/.test(row.start_time) && /^\d{2}:\d{2}$/.test(row.end_time))
       setData({ timetable: rows, schedules: calendarResult.calendar?.schedules || [], loading: false, error: "", academicError })
     } catch (error) {
-      console.error("오늘 수업 데이터 요청 실패", { error, academicUrl: "http://localhost:8000/api/v1/academic-calendar", timetableTable: "timetables" })
+      console.error("오늘 수업 데이터 요청 실패", { error, academicApi: "Supabase Edge Function /academic-calendar", timetableTable: "timetables" })
       setData((value) => ({ ...value, timetable: [], loading: false, error: "수업 정보를 불러오지 못했습니다.", academicError: "" }))
     }
   }

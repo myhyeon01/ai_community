@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   CalendarDays,
+  ChevronLeft,
   ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   Clock3,
   ExternalLink,
   Heart,
@@ -11,11 +14,18 @@ import {
   Sparkles,
   Star,
   TimerReset,
-  X,
 } from "lucide-react";
 import { api } from "./api";
 import { loadUserState, readLocalState } from "./appState";
 import "./events.css";
+
+const EVENT_PAGE_SIZE = 9;
+
+const progressFilters = [
+  ["", "전체 행사"],
+  ["upcoming", "진행 전"],
+  ["ongoing", "진행 중"],
+];
 
 let kmuSyncPromise = null;
 let lastKmuSyncAt = 0;
@@ -24,8 +34,8 @@ async function syncKmuEventsOnce(force = false) {
   if (!force && Date.now() - lastKmuSyncAt < 10 * 60 * 1000) return [];
   if (!kmuSyncPromise) {
     kmuSyncPromise = Promise.allSettled([
-      api("/events/sync/kmu?pages=5&limit=120", { method: "POST" }),
-      api("/events/sync/story?pages=1&limit=120", { method: "POST" }),
+      api("/events/sync/kmu?pages=5&limit=200", { method: "POST" }),
+      api("/events/sync/story?pages=3&limit=200", { method: "POST" }),
     ])
       .then((results) => {
         if (results.every((result) => result.status === "rejected")) {
@@ -122,6 +132,18 @@ const interestAliases = {
   "교육": "education",
 };
 
+const interestKeywords = {
+  major: ["major", "전공", "개발", "소프트웨어", "데이터", "컴퓨터", "프로그래밍", "it"],
+  education: ["education", "교육", "강좌", "특강", "학습"],
+  career: ["career", "취업", "채용", "인턴", "진로", "직무"],
+  contest: ["contest", "공모전", "공모", "대회"],
+  culture: ["culture", "문화", "축제", "공연", "전시"],
+  ai: ["ai", "인공지능", "머신러닝", "딥러닝"],
+  startup: ["startup", "창업", "스타트업"],
+  volunteer: ["volunteer", "봉사"],
+  global: ["global", "글로벌", "해외", "교환학생", "외국어"],
+};
+
 function savedInterests() {
   const stored = readLocalState("kmu-interests", []);
   if (!Array.isArray(stored)) return [];
@@ -163,6 +185,29 @@ function dateValue(value) {
   if (!value) return Number.MAX_SAFE_INTEGER;
   const time = new Date(value).getTime();
   return Number.isNaN(time) ? Number.MAX_SAFE_INTEGER : time;
+}
+
+function localDateKey(date = new Date()) {
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+}
+
+function dateKeyAfter(days) {
+  const date = new Date();
+  date.setHours(12, 0, 0, 0);
+  date.setDate(date.getDate() + days);
+  return localDateKey(date);
+}
+
+function eventMatchesInterests(event, selected) {
+  if (!selected.length) return true;
+  const text = `${event.title || ""} ${event.summary || ""} ${event.interests || ""} ${event.department || ""}`.toLocaleLowerCase("ko");
+  return selected.some((interest) => {
+    const normalized = String(interest || "").trim().toLocaleLowerCase("ko");
+    if (!normalized) return false;
+    const words = interestKeywords[normalized] || [normalized];
+    return words.some((word) => text.includes(String(word).toLocaleLowerCase("ko")));
+  });
 }
 
 function formatDateTime(value) {
@@ -212,33 +257,44 @@ function isKmuNoticeUrl(value) {
   }
 }
 
+function eventProgress(event) {
+  const now = Date.now();
+  const start = new Date(event.starts_at).getTime();
+  const end = new Date(event.ends_at).getTime();
+  return {
+    ongoing: Number.isFinite(start) && Number.isFinite(end) && start <= now && now <= end,
+    ended: Number.isFinite(end) && end < now,
+  };
+}
+
 function deadlineState(event) {
   const now = Date.now();
-  const end = new Date(event.ends_at);
-  if (!Number.isNaN(end.getTime()) && end.getTime() < now)
-    return { label: "마감", closed: true, urgent: false };
+  const progress = eventProgress(event);
+  if (progress.ended)
+    return { label: "종료", closed: true, applicationClosed: true, urgent: false };
+  if (progress.ongoing)
+    return { label: "신청 마감", closed: false, applicationClosed: true, urgent: false };
   if (!event.apply_deadline)
-    return { label: "상시 신청", closed: false, urgent: false };
+    return { label: "상시 신청", closed: false, applicationClosed: false, urgent: false };
   const deadline = new Date(event.apply_deadline);
   if (Number.isNaN(deadline.getTime()))
-    return { label: "마감일 미정", closed: false, urgent: false };
+    return { label: "마감일 미정", closed: false, applicationClosed: false, urgent: false };
   const diff = Math.ceil(
     (deadline.setHours(23, 59, 59, 999) - now) / 86400000,
   );
-  if (diff < 0) return { label: "마감", closed: true, urgent: false };
-  if (diff === 0) return { label: "오늘 마감", closed: false, urgent: true };
-  if (diff <= 3) return { label: `D-${diff}`, closed: false, urgent: true };
-  return { label: `D-${diff}`, closed: false, urgent: false };
+  if (diff < 0) return { label: "신청 마감", closed: true, applicationClosed: true, urgent: false };
+  if (diff === 0) return { label: "오늘 마감", closed: false, applicationClosed: false, urgent: true };
+  if (diff <= 3) return { label: `D-${diff}`, closed: false, applicationClosed: false, urgent: true };
+  return { label: `D-${diff}`, closed: false, applicationClosed: false, urgent: false };
 }
 
 function isDeadlineWithinMonth(event) {
-  if (!event.apply_deadline || deadlineState(event).closed) return false;
-  const now = new Date();
-  const deadline = new Date(event.apply_deadline);
-  if (Number.isNaN(deadline.getTime())) return false;
-  deadline.setHours(23, 59, 59, 999);
-  const daysLeft = (deadline.getTime() - now.getTime()) / 86400000;
-  return daysLeft >= 0 && daysLeft <= 30;
+  const deadline = deadlineState(event);
+  if (!event.apply_deadline || deadline.closed || deadline.applicationClosed) return false;
+  const deadlineKey = String(event.apply_deadline).slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(deadlineKey)
+    && deadlineKey >= localDateKey()
+    && deadlineKey <= dateKeyAfter(30);
 }
 
 function summaryLines(value) {
@@ -256,6 +312,8 @@ function summaryLines(value) {
     .split(/\n+/)
     .map((line) => line.trim())
     .filter((line) => line && line !== "신청 바로가기")
+    .filter((line) => !/\{\s*["']?(?:message|path)["']?\s*:|location\.href|hasToken=|parm_bod_uid=|<!\[CDATA\[|function\s+\w+\s*\(|<\/?(?:script|style)|javascript:/i.test(line))
+    .filter((line) => !/(?:\?\s*){4,}|�{2,}/.test(line))
     .filter((line) => {
       if (seen.has(line)) return false;
       seen.add(line);
@@ -292,8 +350,9 @@ function EventCard({ event, onFavorite, favoriteBusy, showReason }) {
   const [expanded, setExpanded] = useState(false);
   const tags = tagList(event.interests).slice(0, 4);
   const deadline = deadlineState(event);
+  const progress = eventProgress(event);
   const isNoticeLink = isKmuNoticeUrl(event.apply_url);
-  const applyDisabled = !event.apply_url || (deadline.closed && !isNoticeLink);
+  const applyDisabled = !event.apply_url || (deadline.applicationClosed && !isNoticeLink);
   const actionLabel = isNoticeLink ? "게시글 보기" : "신청하기";
   const details = summaryLines(event.summary);
   const visibleDetails = expanded ? details.slice(0, 14) : details.slice(0, 4);
@@ -318,6 +377,9 @@ function EventCard({ event, onFavorite, favoriteBusy, showReason }) {
               <span className="event-source external">
                 {sourceTypeLabel(sourceType)}
               </span>
+            )}
+            {progress.ongoing && (
+              <span className="event-status ongoing">진행 중</span>
             )}
           </div>
           <h3>{event.title || "제목 없는 행사"}</h3>
@@ -442,6 +504,32 @@ function InterestChips({ selected, onToggle }) {
   );
 }
 
+function EventPagination({ page, totalItems, loading, onPageChange, label }) {
+  const totalPages = Math.max(1, Math.ceil(totalItems / EVENT_PAGE_SIZE));
+  if (totalPages <= 1) return null;
+  const visibleCount = Math.min(6, totalPages);
+  const start = Math.min(
+    Math.max(1, page - Math.floor(visibleCount / 2)),
+    Math.max(1, totalPages - visibleCount + 1),
+  );
+  const pages = Array.from({ length: visibleCount }, (_, index) => start + index);
+  return (
+    <nav aria-label={`${label} 페이지`} className="event-pagination">
+      <button aria-label="첫 페이지" disabled={page === 1 || loading} onClick={() => onPageChange(1)} type="button"><ChevronsLeft /></button>
+      <button aria-label="이전 페이지" disabled={page === 1 || loading} onClick={() => onPageChange(Math.max(1, page - 1))} type="button"><ChevronLeft /></button>
+      {pages.map((value) => (
+        <button aria-current={value === page ? "page" : undefined} className={value === page ? "active" : ""} key={value} onClick={() => onPageChange(value)} type="button">{value}</button>
+      ))}
+      <button aria-label="다음 페이지" disabled={page === totalPages || loading} onClick={() => onPageChange(Math.min(totalPages, page + 1))} type="button"><ChevronRight /></button>
+      <button aria-label="마지막 페이지" disabled={page === totalPages || loading} onClick={() => onPageChange(totalPages)} type="button"><ChevronsRight /></button>
+    </nav>
+  );
+}
+
+function pageSlice(items, page) {
+  return items.slice((page - 1) * EVENT_PAGE_SIZE, page * EVENT_PAGE_SIZE);
+}
+
 export default function EventsPage({ profile }) {
   const [active, setActive] = useState("explore");
   const [query, setQuery] = useState("");
@@ -450,11 +538,17 @@ export default function EventsPage({ profile }) {
   const [sort, setSort] = useState("upcoming");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
+  const [progressFilter, setProgressFilter] = useState("");
   const [interests, setInterests] = useState(savedInterests);
   const [events, setEvents] = useState([]);
+  const [eventPage, setEventPage] = useState(1);
+  const [totalEvents, setTotalEvents] = useState(0);
   const [recommendations, setRecommendations] = useState([]);
   const [favorites, setFavorites] = useState([]);
   const [deadlines, setDeadlines] = useState([]);
+  const [recommendPage, setRecommendPage] = useState(1);
+  const [favoritePage, setFavoritePage] = useState(1);
+  const [deadlinePage, setDeadlinePage] = useState(1);
   const [loading, setLoading] = useState({
     events: true,
     recommendations: true,
@@ -465,6 +559,10 @@ export default function EventsPage({ profile }) {
   const [favoriteBusy, setFavoriteBusy] = useState("");
 
   const activeCard = actionCards.find((card) => card.id === active);
+  const totalEventPages = Math.max(
+    1,
+    Math.ceil(totalEvents / EVENT_PAGE_SIZE),
+  );
   const deadlineItems = useMemo(
     () =>
       [...deadlines]
@@ -474,6 +572,9 @@ export default function EventsPage({ profile }) {
         ),
     [deadlines],
   );
+  const visibleRecommendations = useMemo(() => pageSlice(recommendations, recommendPage), [recommendPage, recommendations]);
+  const visibleFavorites = useMemo(() => pageSlice(favorites, favoritePage), [favoritePage, favorites]);
+  const visibleDeadlines = useMemo(() => pageSlice(deadlineItems, deadlinePage), [deadlineItems, deadlinePage]);
 
   const setLoad = useCallback((key, value) => {
     setLoading((prev) => ({ ...prev, [key]: value }));
@@ -487,27 +588,53 @@ export default function EventsPage({ profile }) {
           q: query.trim(),
           category,
           source_type: sourceType,
-          interest: interests,
+          progress: progressFilter,
           start_date: startDate,
           end_date: endDate,
           sort,
           active_only: true,
-          page: 1,
-          limit: 24,
+          page: eventPage,
+          limit: EVENT_PAGE_SIZE,
         });
-      let items = toItems(await api(path));
+      const countPath = withQuery("/events/count", {
+        q: query.trim(),
+        category,
+        source_type: sourceType,
+        progress: progressFilter,
+        start_date: startDate,
+        end_date: endDate,
+        active_only: true,
+      });
+      let [items, countData] = await Promise.all([
+        api(path).then(toItems),
+        api(countPath),
+      ]);
       if (!items.length) {
         await syncKmuEventsOnce();
-        items = toItems(await api(path));
+        [items, countData] = await Promise.all([
+          api(path).then(toItems),
+          api(countPath),
+        ]);
+      }
+      const nextTotal = Number(countData?.total || 0);
+      setTotalEvents(nextTotal);
+      const nextTotalPages = Math.max(
+        1,
+        Math.ceil(nextTotal / EVENT_PAGE_SIZE),
+      );
+      if (eventPage > nextTotalPages) {
+        setEventPage(nextTotalPages);
+        return;
       }
       setEvents(items.filter((event) => !deadlineState(event).closed));
     } catch (e) {
       setEvents([]);
+      setTotalEvents(0);
       setError(`행사 탐색을 불러오지 못했습니다. ${e.message}`);
     } finally {
       setLoad("events", false);
     }
-  }, [category, endDate, interests, query, setLoad, sort, sourceType, startDate]);
+  }, [category, endDate, eventPage, progressFilter, query, setLoad, sort, sourceType, startDate]);
 
   const loadRecommendations = useCallback(async () => {
     setLoad("recommendations", true);
@@ -522,13 +649,14 @@ export default function EventsPage({ profile }) {
           interests,
           department: profile?.department || "",
           grade: profile?.grade || "",
+          limit: 50,
         });
-      let items = toItems(await api(path));
-      if (!items.length) {
-        await syncKmuEventsOnce(true);
-        items = toItems(await api(path));
-      }
-      setRecommendations(items);
+      const items = toItems(await api(path));
+      setRecommendations(
+        items
+          .filter((event) => !deadlineState(event).closed)
+          .filter((event) => eventMatchesInterests(event, interests)),
+      );
     } catch (e) {
       setRecommendations([]);
       setError(`맞춤 추천을 불러오지 못했습니다. ${e.message}`);
@@ -555,7 +683,12 @@ export default function EventsPage({ profile }) {
     setLoad("deadlines", true);
     setError("");
     try {
-      const path = withQuery("/events", { sort: "deadline", limit: 12 });
+      const path = withQuery("/events", {
+        sort: "deadline",
+        deadline_from: localDateKey(),
+        deadline_to: dateKeyAfter(30),
+        limit: 100,
+      });
       let items = toItems(await api(path));
       if (!items.length) {
         await syncKmuEventsOnce();
@@ -584,6 +717,26 @@ export default function EventsPage({ profile }) {
   }, [loadEvents]);
 
   useEffect(() => {
+    setEventPage(1);
+  }, [category, endDate, progressFilter, query, sort, sourceType, startDate]);
+
+  useEffect(() => {
+    setRecommendPage(1);
+  }, [interests]);
+
+  useEffect(() => {
+    setRecommendPage((page) => Math.min(page, Math.max(1, Math.ceil(recommendations.length / EVENT_PAGE_SIZE))));
+  }, [recommendations.length]);
+
+  useEffect(() => {
+    setFavoritePage((page) => Math.min(page, Math.max(1, Math.ceil(favorites.length / EVENT_PAGE_SIZE))));
+  }, [favorites.length]);
+
+  useEffect(() => {
+    setDeadlinePage((page) => Math.min(page, Math.max(1, Math.ceil(deadlineItems.length / EVENT_PAGE_SIZE))));
+  }, [deadlineItems.length]);
+
+  useEffect(() => {
     loadRecommendations();
   }, [loadRecommendations]);
 
@@ -596,16 +749,6 @@ export default function EventsPage({ profile }) {
     setInterests((prev) =>
       prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
     );
-  }
-
-  function clearFilters() {
-    setQuery("");
-    setCategory("");
-    setSourceType("");
-    setSort("upcoming");
-    setStartDate("");
-    setEndDate("");
-    setInterests([]);
   }
 
   async function toggleFavorite(event) {
@@ -701,7 +844,8 @@ export default function EventsPage({ profile }) {
               className="event-filters"
               onSubmit={(e) => {
                 e.preventDefault();
-                loadEvents();
+                if (eventPage === 1) loadEvents();
+                else setEventPage(1);
               }}
             >
               <div className="event-filter-source-row">
@@ -765,15 +909,18 @@ export default function EventsPage({ profile }) {
                 type="date"
                 value={endDate}
               />
-              <button
-                className="clear-filters"
-                onClick={clearFilters}
-                type="button"
-              >
-                <X />
-                초기화
-              </button>
-              <InterestChips selected={interests} onToggle={toggleInterest} />
+              <div aria-label="행사 진행 상태" className="progress-filter-group" role="group">
+                {progressFilters.map(([value, label]) => (
+                  <button
+                    className={progressFilter === value ? "active" : ""}
+                    key={value || "all-progress"}
+                    onClick={() => setProgressFilter(value)}
+                    type="button"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
             </form>
             <EventList
               emptyText="검색어 또는 필터를 조정해 다시 확인해 주세요."
@@ -783,6 +930,7 @@ export default function EventsPage({ profile }) {
               loading={loading.events}
               onFavorite={toggleFavorite}
             />
+            <EventPagination page={eventPage} totalItems={totalEvents} loading={loading.events} onPageChange={setEventPage} label="행사 탐색" />
           </>
         )}
 
@@ -800,34 +948,41 @@ export default function EventsPage({ profile }) {
               emptyText="관심 분야를 선택하거나 추천 데이터가 준비된 뒤 다시 확인해 주세요."
               emptyTitle="추천 행사가 없습니다."
               favoriteBusy={favoriteBusy}
-              items={recommendations}
+              items={visibleRecommendations}
               loading={loading.recommendations}
               onFavorite={toggleFavorite}
               showReason
             />
+            <EventPagination page={recommendPage} totalItems={recommendations.length} loading={loading.recommendations} onPageChange={setRecommendPage} label="맞춤 추천" />
           </>
         )}
 
         {active === "favorites" && (
-          <EventList
-            emptyText="행사 카드의 하트 버튼으로 관심 행사를 저장할 수 있습니다."
-            emptyTitle="저장한 관심 행사가 없습니다."
-            favoriteBusy={favoriteBusy}
-            items={favorites}
-            loading={loading.favorites}
-            onFavorite={toggleFavorite}
-          />
+          <>
+            <EventList
+              emptyText="행사 카드의 하트 버튼으로 관심 행사를 저장할 수 있습니다."
+              emptyTitle="저장한 관심 행사가 없습니다."
+              favoriteBusy={favoriteBusy}
+              items={visibleFavorites}
+              loading={loading.favorites}
+              onFavorite={toggleFavorite}
+            />
+            <EventPagination page={favoritePage} totalItems={favorites.length} loading={loading.favorites} onPageChange={setFavoritePage} label="관심 행사" />
+          </>
         )}
 
         {active === "deadlines" && (
-          <EventList
-            emptyText="오늘부터 30일 이내에 신청이 마감되는 행사가 표시됩니다."
-            emptyTitle="한 달 이내 신청 마감 행사가 없습니다."
-            favoriteBusy={favoriteBusy}
-            items={deadlineItems}
-            loading={loading.deadlines}
-            onFavorite={toggleFavorite}
-          />
+          <>
+            <EventList
+              emptyText="오늘부터 30일 이내에 신청이 마감되는 행사가 표시됩니다."
+              emptyTitle="한 달 이내 신청 마감 행사가 없습니다."
+              favoriteBusy={favoriteBusy}
+              items={visibleDeadlines}
+              loading={loading.deadlines}
+              onFavorite={toggleFavorite}
+            />
+            <EventPagination page={deadlinePage} totalItems={deadlineItems.length} loading={loading.deadlines} onPageChange={setDeadlinePage} label="신청 마감" />
+          </>
         )}
       </section>
     </div>
